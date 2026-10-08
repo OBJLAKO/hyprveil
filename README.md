@@ -115,7 +115,15 @@ CLI changes persist to the managed Lua settings file. Runtime Lua calls affect t
 
 ## Optional Omarchy panel
 
-[**omarchy-hyprveil**](https://github.com/OBJLAKO/omarchy-hyprveil) adds an appearance editor and a bar eye that shows the focused window's effective capture privacy. Left or middle click toggles privacy; right click opens the panel. It uses Hyprveil's public API and CLI.
+[**omarchy-hyprveil**](https://github.com/OBJLAKO/omarchy-hyprveil) adds an appearance editor and a bar eye that shows the focused window's effective capture privacy. Left or middle click toggles privacy; right click opens the panel. English and Russian are supported. It uses Hyprveil's public API and CLI.
+
+Once the native core is installed and active, add the panel through Omarchy's normal plugin manager:
+
+```sh
+omarchy plugin add https://github.com/OBJLAKO/omarchy-hyprveil.git --enable
+```
+
+The panel manages this engine; the engine protects the compositor capture scene. [Panel setup, preview and removal →](https://github.com/OBJLAKO/omarchy-hyprveil#install)
 
 ## Know the boundary
 
