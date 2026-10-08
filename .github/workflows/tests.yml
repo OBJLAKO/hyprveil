@@ -1,0 +1,26 @@
+name: Offline tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install offline test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ make pkg-config libcairo2-dev zlib1g-dev python3 python3-cairo lua5.4
+      - name: Python controller and harness boundaries
+        run: /usr/bin/python3 -m unittest discover -s tests -p 'test_*.py'
+      - name: Standalone C++ boundaries
+        run: make test-session-guard test-png-guard test-privacy-policy test-spoiler-pattern test-appearance test-native-config

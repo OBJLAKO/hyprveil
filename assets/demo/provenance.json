@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "native_sha256": "6b4e8ce6a24f56678c96a118296e530c777dd249123f038bf8844a9d78678641",
+  "source": "real Hyprland GPU captures in a fresh marked isolated compositor",
+  "content": "GTK notes fixture with explicitly synthetic text; no personal desktop or files",
+  "frames": 48,
+  "display_fps": 10,
+  "native_frame_size": [
+    800,
+    500
+  ],
+  "variants": [
+    "satin",
+    "telegram"
+  ],
+  "appearance": {
+    "color": "#a2d9c8",
+    "grain": 65,
+    "speed": 125,
+    "darkness": 28,
+    "eye": true,
+    "eye_size": 96
+  },
+  "local_document_marker_visible": true,
+  "marker_absent_from_every_protected_frame": true,
+  "lab_stopped": true,
+  "processing": "crop-free scaling, rounded framing, labels, GIF palette quantization; no synthesized mask pixels or interpolated motion",
+  "outputs": {
+    "hero.svg": {
+      "bytes": 1772,
+      "sha256": "83683e194ef555929883814094b84d5e4435930517c06b75b98d2e38c438503b"
+    },
+    "demo.gif": {
+      "bytes": 3379140,
+      "sha256": "52b99286e8a1c245b47babb8ed7e4d444464b0214c980f6d5a1b4718f8d9b8ac"
+    },
+    "social-preview.png": {
+      "bytes": 352388,
+      "sha256": "e1bf384948dd113d04647b7c9fd1103addfe75f9ca3ee4d154f06f803a9f8e90"
+    },
+    "demo/poster.png": {
+      "bytes": 218451,
+      "sha256": "90d26f63344fcc0e2b5da3135fd49e35e3b9678dc00f20f0b382de5f52f46b2a"
+    }
+  }
+}
