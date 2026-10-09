@@ -91,7 +91,8 @@ class NativePersistenceTests(unittest.TestCase):
         saved = json.loads(service.read_private(self.fixture.config))
         self.assertEqual(saved["appearance"], status["appearance"])
         self.assertEqual(saved["desired_mode"], "spoiler")
-        self.assertIn(("reload",), self.controller.commands)
+        self.assertNotIn(("reload",), self.controller.commands)
+        self.assertNotIn(("configerrors",), self.controller.commands)
         backup = self.root / ".local/state/hyprveil/last-settings.lua"
         self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
 
@@ -101,6 +102,35 @@ class NativePersistenceTests(unittest.TestCase):
         self.assertEqual(status["appearance"]["grain"], 92)
         self.assertEqual(self.values()["grain"], 92)
         self.assertEqual(self.values()["mode"], "spoiler")
+        self.assertNotIn(("reload",), self.controller.commands)
+
+    def test_noop_save_does_not_rewrite_settings_backup_or_reload(self):
+        self.controller.apply_lua()
+        before = self.source.read_bytes()
+        info = self.source.stat()
+        with patch.object(service, "atomic_lua_settings", wraps=service.atomic_lua_settings) as writer:
+            status = self.controller.run("configure", appearance={})
+        self.assertEqual(service.native_values(status), self.values())
+        self.assertEqual(self.source.read_bytes(), before)
+        self.assertEqual((self.source.stat().st_ino, self.source.stat().st_mtime_ns), (info.st_ino, info.st_mtime_ns))
+        writer.assert_not_called()
+        self.assertFalse((self.root / ".local/state/hyprveil/last-settings.lua").exists())
+        self.assertNotIn(("reload",), self.controller.commands)
+
+    def test_native_change_during_atomic_save_is_not_acknowledged_and_fails_black(self):
+        self.controller.mode = "spoiler"
+        original = service.atomic_lua_settings
+
+        def changed(path, contents, mode=0o600):
+            original(path, contents, mode)
+            if path == self.source:
+                self.controller.appearance["speed"] = 37
+
+        with patch.object(service, "atomic_lua_settings", side_effect=changed), \
+                self.assertRaisesRegex(service.Refused, "native settings changed while saving"):
+            self.controller.run("configure", appearance={"grain": 22})
+        self.assertEqual(self.controller.mode, "black")
+        self.assertNotIn(("reload",), self.controller.commands)
 
     def test_start_applies_lua_without_stale_json_override(self):
         values = dict(self.values(), mode="spoiler", color="#abcdef", grain=17)
@@ -279,15 +309,38 @@ class NativePersistenceTests(unittest.TestCase):
         self.assertEqual(self.source.read_bytes(), edited)
         self.assertEqual(self.controller.mode, "black")
 
-    def test_config_error_and_other_lua_override_fail_black(self):
-        for failure in ("errors", "override"):
-            with self.subTest(failure=failure):
-                self.controller.errors = "synthetic error" if failure == "errors" else ""
-                self.controller.override = {"grain": 99} if failure == "override" else None
-                self.controller.mode = "spoiler"
-                with self.assertRaises(service.Refused):
-                    self.controller.run("configure", appearance={"grain": 22})
-                self.assertEqual(self.controller.mode, "black")
+    def test_custom_override_runs_only_on_explicit_reload_and_returns_actual_state(self):
+        suffix = b"\nhl.config({plugin={hyprveil={grain=99}}})\n"
+        self.source.write_bytes(self.source.read_bytes() + suffix)
+        self.controller.override = {"grain": 99}
+        self.controller.mode = "spoiler"
+        saved = self.controller.run("configure", appearance={"grain": 22})
+        self.assertEqual(saved["appearance"]["grain"], 22)
+        self.assertEqual(self.values()["grain"], 22)
+        self.assertTrue(self.source.read_bytes().endswith(suffix))
+        self.assertNotIn(("reload",), self.controller.commands)
+
+        reloaded = self.controller.run("reload-config")
+        self.assertEqual(reloaded["mode"], "spoiler")
+        self.assertEqual(reloaded["appearance"]["grain"], 99)
+        self.assertEqual(self.values()["grain"], 22)
+        self.assertIn(("reload",), self.controller.commands)
+
+    def test_unrelated_config_errors_are_checked_only_on_explicit_reload(self):
+        self.controller.errors = "synthetic unrelated configuration error"
+        self.controller.mode = "spoiler"
+        saved = self.controller.run("configure", appearance={"grain": 22})
+        self.assertEqual(saved["mode"], "spoiler")
+        self.assertEqual(saved["appearance"]["grain"], 22)
+        self.assertNotIn(("reload",), self.controller.commands)
+        self.assertNotIn(("configerrors",), self.controller.commands)
+        before = self.source.read_bytes()
+
+        with self.assertRaisesRegex(service.Refused, "configuration has errors"):
+            self.controller.run("reload-config")
+        self.assertEqual(self.controller.mode, "black")
+        self.assertEqual(self.source.read_bytes(), before)
+        self.assertIn(("reload",), self.controller.commands)
 
     def test_owned_reader_rejects_links_fifo_and_writable_file(self):
         outside = self.root / "outside.lua"

@@ -893,9 +893,14 @@ class Controller:
             if read_lua_settings(self.lua_path) != before:
                 raise Refused("Lua settings changed while saving the backup; retry")
             atomic_lua_settings(self.lua_path, contents, before[1])
-        status = self.reload_config()
+        # The native partial update already committed these values. Saving the
+        # managed table must not reparse unrelated desktop configuration or
+        # execute custom Lua; dofile persistence is read on the next explicit
+        # config reload/login. Verify the current native state instead.
+        self.verify_identity()
+        status = self.native("status")
         if native_values(status) != expected:
-            raise Refused("other Lua configuration overrides Hyprveil settings; edit that override or the settings file")
+            raise Refused("native settings changed while saving; retry with the current configuration")
         return status
 
     def apply_mode(self, mode, image="", persist=False):

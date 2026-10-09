@@ -23,7 +23,7 @@ These identify local evidence, not portable prebuilt downloads.
 
 | Runner | Completed result | Evidence scope |
 | --- | --- | --- |
-| `hyprpm_smoke.py` | 33/33 | Standard no-marker native admission, disabled live mirror diagnostics, real standalone CLI, automatic settings second pass, partial persistence, canonical aliases/uppercase tint and configurable icon. |
+| `hyprpm_smoke.py` | 39/39 | Standard no-marker native admission, disabled live mirror diagnostics, real standalone CLI, automatic settings second pass, partial persistence, canonical aliases/uppercase tint and configurable icon. A real config-evaluation counter confirms saves do not cause explicit or watcher reloads; explicit Reload Lua still works. |
 | `native_config_smoke.py` | 204/204 | Eleven typed settings across Lua/registry/IPC, old seven-field command compatibility, icon shape/size/opacity, atomic invalid patches, file reload, focused identity, sharing reset and detached callback teardown. |
 | `design_gallery.py` | 724/724 | Ten actual GPU styles, geometric animation, speed-zero freeze/timer disarm, static Matte, opaque replacement, local visibility, black extrema and four icon choices. Fifty-four frames per style supply nine-second public motion galleries; the 404 bitmap also has 105 checked cells with no mismatch. |
 | `style_bounds_smoke.py` | 100/100 | Four expressive styles at four small sizes and scales 1/1.25: 32 combinations, 40 opaque private exports, exact frozen repeats and unchanged local visibility. |
@@ -84,6 +84,27 @@ SIGTERM-resistant processes, delimiter-free oversized output, missing executable
 all style/icon selectors and runtime-only settings. Its repository records
 those results and native asset provenance separately.
 
+## Follow-up: live installation and smooth settings
+
+After the isolated review, the owner requested a real Omarchy uninstall/reinstall.
+Privileged Hyprpm headers/cache preparation and the pinned native build completed;
+Hyprveil 0.5.0 and omarchy-fx 0.4.0 were confirmed loaded with no config errors.
+That fresh host build has a different binary hash from the isolated artifact
+above. Current-session hide/show used only an owned synthetic window; no personal
+desktop capture was made. This does not establish a real cold-login result.
+
+The owner then reported desktop movement on Apply. The CLI's managed-file save
+unnecessarily called a full Hyprland reload after an already acknowledged native
+update. Saves now atomically persist the table and verify the current native
+state without a global reload or custom-Lua execution. The native renderer and
+its reviewed binary are unchanged. All 210 Python tests passed, including no-op
+inode/mtime preservation, partial-field retention, concurrent native changes
+and explicit-reload override/error behavior. The repeated native Hyprpm suite
+passed 39 checks with the same `89bad8…` artifact; its configuration-evaluation
+counter remained unchanged after appearance, icon, no-op and mode saves.
+Ordinary `dofile` settings are not watched in the reviewed Hyprland ABI; custom
+require/wildcard watching remains outside this guarantee.
+
 ## Earlier evidence
 
 The previous 0.4 release had 172 Python tests, six C++ boundary programs and
@@ -93,8 +114,8 @@ historical reproducibility result is not a new cross-compiler/distro guarantee.
 
 ## Remaining gaps and accepted behavior
 
-Privileged hyprpm cache installation/update and a real cold login have not
-been run on this host as part of this review. The standard API artifact,
+The initial isolated review did not run privileged Hyprpm installation; the
+owner-requested follow-up above did. A real cold login remains untested. The standard API artifact,
 configuration ordering and standalone client were tested independently in a
 physical-seat-disabled lab. Follow the cold-login migration instructions.
 

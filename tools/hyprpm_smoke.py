@@ -152,7 +152,12 @@ class HyprpmSmoke(Stress):
         settings_path.write_bytes(original)
         settings_path.chmod(0o600)
         config = self.runtime / "hyprland.lua"
-        config.write_bytes(config.read_bytes() + ("\ndofile(" + service.lua_string(str(settings_path)) + ")\n").encode())
+        passes = self.runtime / "settings-config-passes.txt"
+        # Count real configuration evaluations, including automatic watcher
+        # reloads. Observing only controller argv would miss those reloads.
+        counter = ('\ndo local f=assert(io.open(' + service.lua_string(str(passes)) + ',"a")); '
+                   'f:write("parse\\n"); f:close() end\n')
+        config.write_bytes(config.read_bytes() + ("\ndofile(" + service.lua_string(str(settings_path)) + ")\n" + counter).encode())
         self.unload()
         self.ctl("reload")
         errors = self.ctl("configerrors")
@@ -179,7 +184,11 @@ class HyprpmSmoke(Stress):
                    status=observed, manual_reload_after_load=False, true_cold_login_tested=False)
         self.private_frame("settings-second-pass-spoiler", "spoiler")
 
+        time.sleep(0.6)
+        before_passes = passes.read_text()
+
         persisted = self.cli_command("configure", "--grain", "23")
+        time.sleep(0.6)
         saved = settings_path.read_bytes()
         old_text, old_start, old_finish, _ = service.parse_lua_settings(original)
         new_text, new_start, new_finish, values = service.parse_lua_settings(saved)
@@ -190,9 +199,12 @@ class HyprpmSmoke(Stress):
                    (old_text[:old_start], old_text[old_finish:]) == (new_text[:new_start], new_text[new_finish:]) and
                    saved.endswith(suffix) and not self.ctl("configerrors") and self.receipts_absent(),
                    status=persisted, saved_settings=values, unrelated_suffix_preserved=saved.endswith(suffix))
+        self.check("persistent partial appearance update does not reparse Hyprland or trigger its watcher",
+                   passes.read_text() == before_passes)
         self.private_frame("settings-cli-persisted-spoiler", "spoiler")
         icons = self.cli_command("configure", "--variant", "telegram", "--color", "#ABCDEF",
                                  "--icon", "shield", "--icon-opacity", "37")
+        time.sleep(0.6)
         wanted = dict(wanted, variant="signal", color="#abcdef", icon="shield", icon_opacity=37)
         _, _, _, icon_values = service.parse_lua_settings(settings_path.read_bytes())
         self.check("standalone alias, uppercase tint and icon update persist canonical native values",
@@ -200,7 +212,27 @@ class HyprpmSmoke(Stress):
                    icon_values == dict(mode="spoiler", image_path="", **wanted) and
                    settings_path.read_bytes().endswith(suffix) and not self.ctl("configerrors") and self.receipts_absent(),
                    status=icons, saved_settings=icon_values)
+        self.check("persistent preset and icon changes do not reparse Hyprland",
+                   passes.read_text() == before_passes)
         self.private_frame("settings-cli-configurable-icon", "spoiler")
+        same_stat = settings_path.stat()
+        same = self.cli_command("configure", "--icon", "shield", "--icon-opacity", "37")
+        time.sleep(0.6)
+        self.check("saving unchanged settings keeps the file inode and avoids compositor reload",
+                   same.get("persisted") is True and settings_path.stat().st_ino == same_stat.st_ino and
+                   settings_path.stat().st_mtime_ns == same_stat.st_mtime_ns and passes.read_text() == before_passes)
+        mode = self.cli_command("black")
+        time.sleep(0.6)
+        self.check("persistent mode change updates native state without reparsing Hyprland",
+                   mode.get("mode") == "black" and mode.get("persisted") is True and
+                   service.parse_lua_settings(settings_path.read_bytes())[-1]["mode"] == "black" and
+                   passes.read_text() == before_passes)
+        self.private_frame("settings-cli-persisted-black", "black")
+        self.cli_command("spoiler")
+        restored = self.cli_command("reload-config")
+        self.check("explicit Reload Lua still reparses configuration and preserves saved appearance",
+                   passes.read_text() != before_passes and restored.get("mode") == "spoiler" and
+                   restored.get("appearance") == wanted and not self.ctl("configerrors"))
         self.report["settings_startup_scope"] = "native availability guard before load and automatic second config pass; true cold login untested"
 
     def tests(self):

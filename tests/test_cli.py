@@ -107,6 +107,32 @@ class NativeCLITests(unittest.TestCase):
         self.assertTrue(self.source.read_bytes().endswith(suffix))
         self.assertEqual(service.parse_lua_settings(self.source.read_bytes())[3]["grain"], 71)
         self.assertFalse(self.fixture.fixture.config.exists())
+        self.assertNotIn(("reload",), self.controller.commands)
+
+    def test_partial_icon_save_keeps_mode_image_and_other_appearance_without_reload(self):
+        self.controller.mode = "omit"
+        self.controller.image_path = str(self.root / "retained.png")
+        self.controller.appearance.update(variant="matrix", color="#234567", grain=32, speed=17, darkness=68,
+                                          eye=False, eye_size=64, icon="shield", icon_opacity=29)
+        expected = service.native_values(self.controller.native("status"))
+        expected["icon_opacity"] = 53
+        result = self.controller.run("configure", appearance={"icon_opacity": 53})
+        self.assertTrue(result["persisted"])
+        self.assertEqual(service.native_values(result), expected)
+        self.assertEqual(service.parse_lua_settings(self.source.read_bytes())[3], expected)
+        self.assertNotIn(("reload",), self.controller.commands)
+
+    def test_noop_save_stays_persisted_without_writes_or_global_reload(self):
+        self.controller.apply_lua()
+        before = self.source.read_bytes()
+        info = self.source.stat()
+        with patch.object(service, "atomic_lua_settings", wraps=service.atomic_lua_settings) as writer:
+            result = self.controller.run("configure", appearance={})
+        self.assertTrue(result["persisted"])
+        self.assertEqual(self.source.read_bytes(), before)
+        self.assertEqual((self.source.stat().st_ino, self.source.stat().st_mtime_ns), (info.st_ino, info.st_mtime_ns))
+        writer.assert_not_called()
+        self.assertNotIn(("reload",), self.controller.commands)
 
     def test_custom_settings_refuse_before_mutation_but_allow_explicit_runtime(self):
         self.source.write_bytes(b"-- user Lua\nhl.plugin.hyprveil.configure({grain=73})\n")

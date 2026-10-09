@@ -144,16 +144,18 @@ Lua bindings for `p.toggle()` and `p.reset_sharing()` as shown in the README.
 ## Persistence and precedence
 
 Runtime Lua and dispatchers affect the current session. Saving the Lua file
-persists settings. The CLI and panel update an existing managed literal table, save
-a private previous-file backup, reload Hyprland, check configuration errors
-and verify native acknowledgement. `hyprveil reload-config` and
+persists settings. The CLI and panel apply the requested fields through the
+native API, update an existing managed literal table, save a private previous-file
+backup and verify native acknowledgement. Ordinary saves do not reload Hyprland
+or execute custom Lua. `hyprveil reload-config` and
 **Reload Lua** explicitly reread the configuration. If no managed settings file
 exists, changes are explicitly reported as session-only. Custom/unsafe Lua is
 refused before mutation; use the CLI's `--runtime` option for an intentional
 temporary edit or edit your Lua file directly.
 
 Place the settings `dofile` where you want it in your normal Hyprland config.
-Later Lua configuration wins according to Hyprland's parse order. The legacy
+On the next full configuration reload, later Lua configuration wins according
+to Hyprland's parse order. The legacy
 installer places its managed loader before user overrides.
 The panel shows actual native mode and appearance even after a later override
 or binding changes them. Partial CLI updates preserve other actual fields.
@@ -163,8 +165,11 @@ The panel updates literals between `BEGIN HYPRVEIL SETTINGS` and
 never executes Lua. If you put expressions inside that table, update it
 through Lua or move custom code after the block. GUI saving refuses ambiguous
 tables, unsafe files and concurrent edits. Install upgrades preserve an
-existing settings file byte for byte. A later override that prevents a GUI
-value is reported; the command does not claim an effective change.
+existing settings file byte for byte. A save confirms the current native result;
+it cannot predict an override that custom code will apply on a future reload.
+Use `dofile` as shown in the examples: in the reviewed Hyprland ABI it does not
+register this settings file with the automatic configuration watcher. A custom
+`require` or wildcard watcher can still trigger Hyprland reloads when files change.
 
 Only the legacy installer uses `~/.config/hyprveil/config.json` for admission
 pins, enable state and a migration mirror. Standard hyprpm loading and the
