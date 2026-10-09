@@ -6,18 +6,30 @@ CXXFLAGS += -std=c++23 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-in
 # Admission pins must survive copying the same source to another checkout.
 CXXFLAGS += -ffile-prefix-map="$(CURDIR)"=. -fdebug-prefix-map="$(CURDIR)"=.
 LDLIBS += $(shell $(PKG_CONFIG) --libs hyprland) -lGLESv2 -ldl -lz
+PREFIX ?= $(HOME)/.local
+DESTDIR ?=
 
-.PHONY: all clean upgrade-guard test-session-guard test-png-guard test-privacy-policy test-spoiler-pattern test-appearance test-native-config
+.PHONY: all clean check-abi install-cli upgrade-guard test-session-guard test-png-guard test-privacy-policy test-spoiler-pattern test-appearance test-native-config
 all: build/hyprveil.so
 
-build/abi-probe: src/abi_probe.cpp
+build/abi-probe: src/abi_probe.cpp src/SessionGuard.hpp
 	mkdir -p build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
 
-build/hyprveil.so: src/main.cpp src/SessionGuard.hpp src/PngGuard.hpp src/PrivacyPolicy.hpp src/SpoilerPattern.hpp src/Appearance.hpp src/NativeConfig.hpp
+check-abi: build/abi-probe
+	./build/abi-probe --check
+
+build/hyprveil.so: src/main.cpp src/SessionGuard.hpp src/PngGuard.hpp src/PrivacyPolicy.hpp src/SpoilerPattern.hpp src/Appearance.hpp src/NativeConfig.hpp | check-abi
 	mkdir -p build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -shared $< -o $@.tmp $(LDFLAGS) $(LDLIBS)
 	mv $@.tmp $@
+
+# Optional client only. hyprpm owns native installation and loading.
+install-cli:
+	install -Dm755 tools/cli.py "$(DESTDIR)$(PREFIX)/libexec/hyprveil/cli.py"
+	install -Dm644 tools/service.py "$(DESTDIR)$(PREFIX)/libexec/hyprveil/service.py"
+	install -d "$(DESTDIR)$(PREFIX)/bin"
+	ln -sfn ../libexec/hyprveil/cli.py "$(DESTDIR)$(PREFIX)/bin/hyprveil"
 
 # One-time migration bridge for the explicitly pinned predecessor ELFs.
 build/hyprveil-upgrade-guard.so: tools/upgrade_guard.cpp src/SessionGuard.hpp src/PrivacyPolicy.hpp

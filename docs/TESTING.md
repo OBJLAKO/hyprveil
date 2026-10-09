@@ -16,7 +16,8 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 make test-session-guard test-png-guard test-privacy-policy test-spoiler-pattern test-appearance test-native-config
 ```
 
-The GitHub workflow runs those checks on Ubuntu 24.04. It does not load a
+The GitHub workflow runs those checks on Ubuntu 24.04, including standalone
+C++ ASan/UBSan instrumentation. It does not load a
 Hyprland plugin, exercise GL, start a portal or claim compatibility with an
 Ubuntu compositor package.
 
@@ -72,12 +73,17 @@ not a general process sandbox.
 
 Full rendering fixtures use GTK4/PyGObject, `grim`, Wayland client development
 files and `wayland-scanner`. Suites may need additional dependencies below.
-Use the actual parent display name, not an inferred different instance:
+Use the actual parent display name, not an inferred different instance. For
+media and bounds runs, replace `REVIEWED_SHA256` with the candidate binary hash
+from `sha256sum build/hyprveil.so`:
 
 ```sh
 python3 tools/spoiler_smoke.py --parent-runtime "$XDG_RUNTIME_DIR" --parent-display "$WAYLAND_DISPLAY" --customization
 python3 tools/native_config_smoke.py --parent-runtime "$XDG_RUNTIME_DIR" --parent-display "$WAYLAND_DISPLAY"
 python3 tools/lock_smoke.py --parent-runtime "$XDG_RUNTIME_DIR" --parent-display "$WAYLAND_DISPLAY"
+python3 tools/hyprpm_smoke.py --parent-runtime "$XDG_RUNTIME_DIR" --parent-display "$WAYLAND_DISPLAY"
+python3 tools/design_gallery.py --parent-runtime "$XDG_RUNTIME_DIR" --parent-display "$WAYLAND_DISPLAY" --plugin-sha256 REVIEWED_SHA256
+python3 tools/style_bounds_smoke.py --parent-runtime "$XDG_RUNTIME_DIR" --parent-display "$WAYLAND_DISPLAY" --plugin-sha256 REVIEWED_SHA256
 ```
 
 These runners create and stop their own labs. For the original smoke and
@@ -105,7 +111,10 @@ readback. Never crop the personal desktop to obtain a local test reference.
 | --- | --- |
 | `smoke.py` | Local/capture distinction, monitor/region, omit/image/black, PNG fallback, foreground stacking and geometry. Requires an existing marked lab. |
 | `spoiler_smoke.py` | Opaque animation, persistent `copy_with_damage`, frozen settings, fullscreen and appearance extrema. `--force-shader-failure` exercises the black latch. |
-| `native_config_smoke.py` | All nine native fields and mutation routes, invalid atomic patches, bad-file black fallback, focused identity, sharing reset and callback teardown. |
+| `native_config_smoke.py` | All eleven native fields and mutation routes, invalid atomic patches, bad-file black fallback, focused identity, sharing reset and callback teardown. |
+| `hyprpm_smoke.py` | Standard no-marker native admission, public API and real standalone CLI, settings second-pass loading and managed persistence. This does not run the privileged hyprpm cache manager or a physical cold login. |
+| `design_gallery.py` | Actual GPU gallery of every style, distinct output, opaque private replacement, animation/freeze/extrema and static-style timer behavior. |
+| `style_bounds_smoke.py` | Four expressive styles at four small sizes and scales 1/1.25, opacity, privacy, exact frozen repeats and unchanged local visibility. Captures require visual review for readability. |
 | `popup_smoke.py --inherit-dialog --parent-lifecycle` | Real GTK parent/dialog and protocol-role destruction, retained privacy and direct-window export. |
 | `x11_smoke.py` | Actual X11 transient ownership, pending consent and parent lifetime; needs XWayland/XCB. See [X11-TESTING.md](X11-TESTING.md). |
 | `permission_smoke.py --case privacy` | Allocated native pending snapshot invalidated before the first approved capture. Repeat with black, omit and image. |
@@ -115,6 +124,13 @@ readback. Never crop the personal desktop to obtain a local test reference.
 | `fx_smoke.py --fx-plugin /absolute/path/omarchy-fx.so` | Actual private/public transformers and pixel safety. Requires a reviewed compatible FX build. Does not test visual mask inheritance. |
 | `stress.py` | Movement, resize, scale, reload, unload/reload and bounded repeated captures. |
 | `upgrade_smoke.py --old-plugin /absolute/path/reviewed-old.so` | Exact allowlisted predecessor, held gap and weak retention handoff. An optional `--watcher` tests the independent GUI stream. |
+
+The standard-admission runner omits only `HYPRVEIL_LAB_RUNTIME` from the child
+compositor. Its physical-seat guard, private runtime/HOME, metadata, socket
+identity checks and synthetic fixtures remain enforced. A test-only CLI
+adapter selects that attested lab; the production controller still refuses a
+lab runtime. Diagnostic local-mirror readback remains unavailable to standard
+plugin admission.
 
 Read each runner's `--help` before adding options. An unavailable dependency,
 refused parent or failed allocator is a setup failure, not a rendering pass.

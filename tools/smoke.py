@@ -13,6 +13,9 @@ import cairo
 
 from lab import PROJECT, load_lab, lab_env
 
+sys.path.insert(0, str(PROJECT / "tests"))
+from verify_capture import Image, opacity_fraction
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -114,9 +117,24 @@ def main():
         if response != "ok":
             raise RuntimeError("plugin load: " + response)
         loaded = True
-        print(ctl("hyprveil", "status"), flush=True)
+        initial = json.loads(ctl("hyprveil", "status"))
+        print(json.dumps(initial), flush=True)
+        if initial.get("mode") != "black":
+            raise RuntimeError("plugin did not start with safe native black defaults")
         if ctl("getprop", address, "no_screen_share") != "true":
             raise RuntimeError("native capture protection lost after plugin load/config reload")
+        initial_black = capture("plugin-initial-black.png")
+        check("plugin starts with opaque black protection", "color", "--image", initial_black,
+              "--rect", rect, "--color", "000000")
+        check("initial plugin defaults contain no private pixels anywhere", "absence", "--image", initial_black)
+        initial_image = Image(initial_black)
+        opaque = opacity_fraction(initial_image, (0, 0, initial_image.width, initial_image.height)) == 1
+        checks.append({"name": "initial black export is fully opaque", "ok": opaque})
+        if not opaque:
+            raise RuntimeError("initial black privacy mask produced a transparent export")
+        # Typed native configuration starts in black. Select omission before
+        # comparing its exported scene with the public underlay.
+        ctl("hyprveil", "omit")
         ctl("hyprveil", "dump-local")
         sanitized = capture("omitted.png")
         local = artifacts / "local.png"

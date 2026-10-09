@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "kind": "illustration",
+  "renderer": "Pycairo vector artwork, rasterized from the SVG with librsvg",
+  "description": "Generic fictional notes are visible locally and covered by an opaque mask in the screen share.",
+  "dimensions": [
+    1280,
+    640
+  ],
+  "desktop_capture": false,
+  "checks": {
+    "scene_pixels_different_outside_private_window_above_tolerance": 0,
+    "rgb_tolerance": 2,
+    "maximum_antialias_delta": 2,
+    "same_private_window_geometry": [
+      224,
+      112,
+      312,
+      194
+    ],
+    "comparison_boundary_padding": 2
+  },
+  "sha256": {
+    "hero.svg": "33b355412db9d3b2d5abef433c8f2e2bcecfd3953e6ae3d5727a1bef5f8eb1f3",
+    "social-preview.png": "f46eb09b6bbdad4c69504f258ac9dff2f7cbb2fa2273392f1b0e91aa597be7c9",
+    "render-cover.py": "ac2f315d5d62021648f78dbbc4142fb519f97cfdf2204d58550364499c2a4c36"
+  }
+}

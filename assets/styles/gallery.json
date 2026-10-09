@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "renderer": "Hyprveil native GLES shader; marked synthetic Hyprland lab",
+  "plugin_sha256": "89bad8c991c61b78f6eeb0cbc31d92f71af7a856ef0b6098a9d592cc21ac06cb",
+  "variants": [
+    "prism",
+    "signal",
+    "aurora",
+    "contour",
+    "radar",
+    "matte",
+    "error404",
+    "matrix",
+    "anonymous",
+    "glass"
+  ],
+  "settings": {
+    "variant": "prism",
+    "color": "#ffffff",
+    "grain": 50,
+    "speed": 100,
+    "darkness": 35,
+    "eye": false,
+    "eye_size": 80,
+    "icon": "eye",
+    "icon_opacity": 75
+  },
+  "native_size": [
+    1000,
+    640
+  ],
+  "motion": {
+    "file": "motion.gif",
+    "frames": 54,
+    "fps": 6,
+    "native_capture": true,
+    "settings": {
+      "variant": "prism",
+      "color": "#ffffff",
+      "grain": 0,
+      "speed": 125,
+      "darkness": 35,
+      "eye": false,
+      "eye_size": 80,
+      "icon": "eye",
+      "icon_opacity": 75
+    },
+    "sha256": "acbf65713a3dd16e60888d94cc13759607aa3815c98aa97de1da797a8b50d824"
+  },
+  "playful": {
+    "file": "playful.gif",
+    "variants": [
+      "error404",
+      "matrix",
+      "anonymous",
+      "glass"
+    ],
+    "frames": 54,
+    "fps": 6,
+    "sha256": "92e73a638891ebfb7aabcff51fe17e7ca2b7a201fa3b409dc05867598b3d0cd9",
+    "still": "playful.png",
+    "still_sha256": "c8f3502f2840a7bcdf7f45bd9d5f5faadd25cc6bcee576e13d55b48ddcec0c1d"
+  },
+  "icons": {
+    "file": "icons.png",
+    "shapes": [
+      "eye",
+      "lock",
+      "shield",
+      "none"
+    ],
+    "sha256": "d7f9de41a4e4477ca7044de997742b2992b346572ecbacc1773121662990828d"
+  },
+  "gallery_sha256": "9454530a598528937b163e0b50eebcb91edcc9d982f10e345dac54acf0084868",
+  "checks": 724,
+  "all_checks_passed": true
+}

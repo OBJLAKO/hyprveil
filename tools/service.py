@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import selectors
 import socket
 import stat
 import struct
@@ -29,10 +30,54 @@ class NotReady(Refused):
     pass
 
 
-DEFAULT_APPEARANCE = {"variant": "satin", "color": "#ffffff", "grain": 50,
-                      "speed": 100, "darkness": 50, "eye": True, "eye_size": 80}
+def bounded_command(argv, *, env, timeout, limit=131072):
+    """Drain both IPC streams under one byte budget and reap every child."""
+    process = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    streams = {process.stdout: bytearray(), process.stderr: bytearray()}
+    deadline = time.monotonic() + timeout
+    total = 0
+    try:
+        with selectors.DefaultSelector() as ready:
+            for stream in streams:
+                ready.register(stream, selectors.EVENT_READ)
+            while ready.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                for key, _ in ready.select(remaining):
+                    chunk = os.read(key.fileobj.fileno(), min(8192, limit - total + 1))
+                    if not chunk:
+                        ready.unregister(key.fileobj)
+                        continue
+                    total += len(chunk)
+                    if total > limit:
+                        raise Refused("oversized compositor response")
+                    streams[key.fileobj].extend(chunk)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            status = process.wait(timeout=remaining)
+        return subprocess.CompletedProcess(argv, status,
+            streams[process.stdout].decode("utf-8"), streams[process.stderr].decode("utf-8"))
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        process.stdout.close()
+        process.stderr.close()
+
+
+TESTED_ABI = "efb50993780079460b0cbed1363e2166a2de1d9f_aq_0.15_hu_0.14_hg_0.5_hc_0.1_hlg_0.6"
+APPEARANCE_VARIANTS = ("prism", "signal", "aurora", "contour", "radar", "matte", "error404", "matrix", "anonymous", "glass")
+APPEARANCE_ALIASES = {"satin": "prism", "telegram": "signal", "grid": "radar", "404": "error404", "cmatrix": "matrix",
+                      "anon": "anonymous", "liquid-glass": "glass", "liquidglass": "glass"}
+DEFAULT_APPEARANCE = {"variant": "prism", "color": "#ffffff", "grain": 50,
+                      "speed": 100, "darkness": 50, "eye": True, "eye_size": 80,
+                      "icon": "eye", "icon_opacity": 75}
+ICON_FIELDS = {"icon", "icon_opacity"}
 APPEARANCE_RANGES = {"grain": (0, 100), "speed": (0, 200),
-                     "darkness": (0, 100), "eye_size": (40, 128)}
+                     "darkness": (0, 100), "eye_size": (40, 128), "icon_opacity": (0, 100)}
 LUA_BEGIN = "-- BEGIN HYPRVEIL SETTINGS v1"
 LUA_END = "-- END HYPRVEIL SETTINGS v1"
 CONFIG_FIELDS = ("mode", "image_path", *DEFAULT_APPEARANCE)
@@ -46,7 +91,13 @@ def lua_string(value):
 
 
 def native_values(status):
-    appearance = validate_appearance(status.get("appearance"), canonical=True)
+    if not isinstance(status.get("appearance"), dict):
+        raise Refused("invalid native appearance")
+    appearance = dict(status["appearance"])
+    for field in ICON_FIELDS:
+        if field in status:
+            appearance[field] = status[field]
+    appearance = validate_appearance(appearance, canonical=True)
     mode, image = status.get("mode"), status.get("image_path", "")
     if mode not in ("omit", "black", "image", "spoiler") or not isinstance(image, str) or len(image.encode()) > 4096 or \
        any(ord(c) < 32 or ord(c) == 127 for c in image) or image and not Path(image).is_absolute():
@@ -55,8 +106,8 @@ def native_values(status):
 
 
 def lua_settings_block(values):
-    native_values({"mode": values["mode"], "image_path": values["image_path"],
-                   "appearance": {key: values[key] for key in DEFAULT_APPEARANCE}})
+    values = native_values({"mode": values["mode"], "image_path": values["image_path"],
+                   "appearance": validate_appearance({key: values[key] for key in DEFAULT_APPEARANCE if key in values})})
     lines = [LUA_BEGIN, "local hyprveil_settings = {"]
     for key in CONFIG_FIELDS:
         value = values[key]
@@ -122,10 +173,10 @@ def parse_lua_settings(contents):
         else:
             values[key] = literal == "true" if literal in ("true", "false") else int(literal)
         remainder = remainder[field.end():]
-    if values.keys() != set(CONFIG_FIELDS):
-        raise Refused("settings block must contain all nine supported fields")
-    native_values({"mode": values["mode"], "image_path": values["image_path"],
-                   "appearance": {key: values[key] for key in DEFAULT_APPEARANCE}})
+    if not set(CONFIG_FIELDS) - ICON_FIELDS <= values.keys():
+        raise Refused("settings block must contain all supported legacy fields")
+    values = native_values({"mode": values["mode"], "image_path": values["image_path"],
+                   "appearance": validate_appearance({key: values[key] for key in DEFAULT_APPEARANCE if key in values})})
     return text, start, finish + len(LUA_END), values
 
 
@@ -181,10 +232,14 @@ def atomic_lua_settings(path, contents, mode=0o600):
 
 
 def validate_appearance(value, canonical=False):
-    if not isinstance(value, dict) or value.keys() != DEFAULT_APPEARANCE.keys():
-        raise Refused("appearance must contain exactly the seven supported fields")
-    if value["variant"] not in ("satin", "telegram"):
+    if not isinstance(value, dict) or not DEFAULT_APPEARANCE.keys() - ICON_FIELDS <= value.keys() or value.keys() - DEFAULT_APPEARANCE.keys():
+        raise Refused("appearance must contain the supported fields; only icon additions are optional")
+    value = dict({field: DEFAULT_APPEARANCE[field] for field in ICON_FIELDS}, **value)
+    variant = APPEARANCE_ALIASES.get(value["variant"], value["variant"]) if isinstance(value["variant"], str) else None
+    if variant not in APPEARANCE_VARIANTS:
         raise Refused("invalid appearance variant")
+    if not isinstance(value["icon"], str) or value["icon"] not in ("eye", "lock", "shield", "none"):
+        raise Refused("icon must be eye, lock, shield or none")
     color = value["color"]
     if not isinstance(color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", color) or canonical and color != color.lower():
         raise Refused("appearance color must be #RRGGBB")
@@ -193,7 +248,7 @@ def validate_appearance(value, canonical=False):
             raise Refused(f"appearance {field} must be an integer from {minimum} to {maximum}")
     if type(value["eye"]) is not bool:
         raise Refused("appearance eye must be a boolean")
-    return dict(value, color=color.lower())
+    return dict(value, variant=variant, color=color.lower())
 
 
 def merge_appearance(current, patch):
@@ -213,7 +268,8 @@ def appearance_integer(field):
 
 
 def appearance_arguments(parser):
-    parser.add_argument("--variant", choices=("satin", "telegram"))
+    parser.add_argument("--variant", choices=(*APPEARANCE_VARIANTS, *APPEARANCE_ALIASES))
+    parser.add_argument("--icon", choices=("eye", "lock", "shield", "none"))
     parser.add_argument("--color", help="opaque tint in #RRGGBB format")
     for field in APPEARANCE_RANGES:
         parser.add_argument("--" + field.replace("_", "-"), type=appearance_integer(field))
@@ -380,8 +436,7 @@ class Controller:
                 timeout = min(timeout, self.connection_deadline - time.monotonic())
                 if timeout <= 0:
                     raise NotReady("compositor startup deadline elapsed")
-            response = subprocess.run(["/usr/bin/hyprctl", "-i", self.signature, *args], env=env,
-                                      capture_output=True, text=True, timeout=timeout)
+            response = bounded_command(["/usr/bin/hyprctl", "-i", self.signature, *args], env=env, timeout=timeout)
         except subprocess.TimeoutExpired as error:
             raise Refused("compositor IPC timed out") from error
         value = response.stdout.strip()
@@ -501,7 +556,14 @@ class Controller:
         # Missing appearance remains valid for black/status commands used by
         # the guarded upgrade of a pinned 0.2 predecessor.
         if "appearance" in value:
-            validate_appearance(value["appearance"], canonical=True)
+            appearance = dict(value["appearance"]) if isinstance(value["appearance"], dict) else value["appearance"]
+            if ("icon" in value) != ("icon_opacity" in value):
+                raise Refused("incomplete native icon status")
+            if isinstance(appearance, dict):
+                for field in ICON_FIELDS:
+                    if field in value:
+                        appearance[field] = value[field]
+            value = dict(value, appearance=validate_appearance(appearance, canonical=True))
         if "config_api" in value:
             if type(value["config_api"]) is not int or value["config_api"] != 1 or "image_path" not in value:
                 raise Refused("invalid native configuration API")
@@ -523,9 +585,14 @@ class Controller:
         previous = None
         if value is not None:
             value = validate_appearance(value)
-            previous = self.native("status")["mode"]
+            before = self.native("status")
+            previous = before["mode"]
             args += (value["variant"], value["color"], str(value["grain"]), str(value["speed"]),
                      str(value["darkness"]), "1" if value["eye"] else "0", str(value["eye_size"]))
+            if ICON_FIELDS <= before.keys():
+                args += (value["icon"], str(value["icon_opacity"]))
+            elif any(value[field] != DEFAULT_APPEARANCE[field] for field in ICON_FIELDS):
+                raise Refused("this loaded release does not support icon customization")
         status = self.live_status(self.query(*args))
         actual = validate_appearance(status.get("appearance"), canonical=True)
         if value is not None and (actual != value or status["mode"] != previous):
@@ -534,6 +601,13 @@ class Controller:
 
     def native_configure(self, patch, expected):
         before = native_values(expected)
+        patch = dict(patch)
+        if "variant" in patch and isinstance(patch["variant"], str):
+            patch["variant"] = APPEARANCE_ALIASES.get(patch["variant"], patch["variant"])
+        if "color" in patch and isinstance(patch["color"], str):
+            patch["color"] = patch["color"].lower()
+        if patch.keys() & ICON_FIELDS and not ICON_FIELDS <= expected.keys():
+            raise Refused("this loaded release does not support icon customization")
         candidate = dict(before, **patch)
         # Validation also bounds every emitted literal and admits only fixed
         # keys. The compare and partial commit execute in one compositor turn.
@@ -544,7 +618,9 @@ class Controller:
             return lua_string(value) if isinstance(value, str) else ("true" if value else "false") if type(value) is bool else str(value)
         assertions = []
         for field, value in before.items():
-            accessor = "s." + field if field in ("mode", "image_path") else "s.appearance." + field
+            if field in ICON_FIELDS and field not in expected:
+                continue
+            accessor = "s." + field if field in ("mode", "image_path", *ICON_FIELDS) else "s.appearance." + field
             assertions.append(accessor + " == " + literal(value))
         entries = ",".join(key + "=" + literal(value) for key, value in patch.items())
         code = ('local p=hl.plugin.hyprveil; assert(p,"Hyprveil unavailable"); local s=p.status(); '
@@ -591,41 +667,68 @@ class Controller:
     def marker_path(self):
         return self.runtime / f".hyprveil-live-{self.target.pid}"
 
-    def remove_marker(self):
+    def read_marker(self):
         path = self.marker_path()
         try:
             contents = read_private(path, 4096).decode()
         except FileNotFoundError:
-            return
-        lines = contents.splitlines()
-        if len(lines) != 5 or not contents.endswith("\n") or lines[:4] != ["hyprveil-live-v1", str(self.target.pid), self.signature, "black"] or not re.fullmatch(r"[0-9]+", lines[4]):
+            return None
+        except UnicodeError as error:
+            raise Refused("existing live marker is not valid UTF-8") from error
+        # Match the native getline grammar exactly; splitlines() also accepts
+        # CRLF and control separators which do not represent valid native consent.
+        lines = contents.split("\n")
+        if (len(lines) != 6 or lines.pop() != "" or
+                lines[:3] != ["hyprveil-live-v1", str(self.target.pid), self.signature] or
+                lines[3] not in ("black", "cancelled") or not re.fullmatch(r"[0-9]+", lines[4]) or
+                lines[3] == "cancelled" and lines[4] != "0"):
             raise Refused("existing live marker is not this controller's selected session")
-        # Reopen the parent and compare the inode immediately before unlinking.
-        # Unknown or concurrently replaced markers are never removed.
+        return contents
+
+    def write_marker(self, contents, previous):
+        path = self.marker_path()
         directory = check_directory(self.runtime)
         fd = -1
         try:
-            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+            flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+            fd = os.open(path.name, flags | (os.O_CREAT | os.O_EXCL if previous is None else 0),
+                         0o600, dir_fd=directory)
             opened = os.fstat(fd)
             current = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
             if not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid() or stat.S_IMODE(opened.st_mode) != 0o600 or opened.st_nlink != 1 or \
-               (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino) or os.read(fd, 4097).decode() != contents:
-                raise Refused("live marker changed during cleanup")
-            os.unlink(path.name, dir_fd=directory)
+               (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino) or \
+               (previous is not None and os.read(fd, 4097) != previous.encode()):
+                raise Refused("live marker changed before admission update")
+            # Rewrite only the validated inode; never replace an unknown path
+            # or follow a link. Intermediate short/invalid contents deny native
+            # admission. Keep cancelled tombstones until explicit rearming or
+            # runtime cleanup so late compositor consent cannot become a normal
+            # marker-free Hyprpm load after a controller timeout.
+            encoded = contents.encode()
+            if os.pwrite(fd, encoded, 0) != len(encoded):
+                raise Refused("could not write the complete live marker")
+            os.ftruncate(fd, len(encoded))
+            os.fsync(fd)
         finally:
             if fd >= 0:
                 os.close(fd)
             os.close(directory)
 
-    def create_marker(self):
-        self.remove_marker()
-        path = self.marker_path()
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-        with os.fdopen(fd, "w") as handle:
-            os.fchmod(handle.fileno(), 0o600)
-            handle.write(f"hyprveil-live-v1\n{self.target.pid}\n{self.signature}\nblack\n{int(time.time()) + 120}\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+    def remove_marker(self):
+        previous = self.read_marker()
+        if previous is None:
+            return # Standard no-marker loads never create cancellation state.
+        cancelled = f"hyprveil-live-v1\n{self.target.pid}\n{self.signature}\ncancelled\n0\n"
+        if previous != cancelled:
+            self.write_marker(cancelled, previous)
+
+    def create_marker(self, lifetime=120):
+        if type(lifetime) is not int or not 1 <= lifetime <= 14400:
+            raise Refused("live trial lifetime must be within four hours")
+        previous = self.read_marker()
+        expires = int(time.time()) + lifetime
+        self.write_marker(f"hyprveil-live-v1\n{self.target.pid}\n{self.signature}\nblack\n{expires}\n", previous)
+        return expires
 
     def safe_image(self, path):
         image = Path(path)
@@ -754,6 +857,8 @@ class Controller:
         before = read_lua_settings(self.lua_path)
         text, start, finish, _ = parse_lua_settings(before[0])
         values = dict(native_values(current), **updates)
+        values = native_values({"mode": values["mode"], "image_path": values["image_path"],
+                                "appearance": validate_appearance({key: values[key] for key in DEFAULT_APPEARANCE})})
         contents = (text[:start] + lua_settings_block(values) + text[finish:]).encode()
         return before, contents, values
 

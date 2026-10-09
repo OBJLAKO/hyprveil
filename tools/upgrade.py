@@ -58,14 +58,21 @@ def upgrade(args):
     project = Path(__file__).resolve().parents[1]
     plugin = project / "build/hyprveil.so"
     guard = project / "build/hyprveil-upgrade-guard.so"
-    if service.digest_file(plugin) != args.plugin_sha256 or service.digest_file(guard) != args.guard_sha256:
+    # Snapshot and attest the actual bytes before holding capture or unloading
+    # the predecessor. A concurrent build must not replace either candidate
+    # between its hash check and the later native load/install.
+    plugin_bytes = install.read_owned(plugin)[0]
+    guard_bytes = install.read_owned(guard)[0]
+    if install.sha(plugin_bytes) != args.plugin_sha256 or install.sha(guard_bytes) != args.guard_sha256:
         raise service.Refused("candidate binaries differ from the explicit tested pins")
     artifacts = project / "artifacts"
     install.ensure(artifacts)
     folder = Path(tempfile.mkdtemp(prefix="protected-upgrade-", dir=artifacts))
     folder.chmod(0o700)
+    plugin = folder / "hyprveil.so"
     frozen_guard = folder / "hyprveil-upgrade-guard.so"
-    install.atomic(frozen_guard, install.read_owned(guard)[0], 0o400)
+    install.atomic(plugin, plugin_bytes, 0o400)
+    install.atomic(frozen_guard, guard_bytes, 0o400)
     report = {"version": 1, "ok": False, "phase": "preflight", "capture_held": False,
               "old_sha256": old_sha, "new_sha256": args.plugin_sha256,
               "guard_sha256": args.guard_sha256, "report": str(folder / "report.json")}

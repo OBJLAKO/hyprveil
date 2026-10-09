@@ -25,7 +25,8 @@ Bytes compressed(const Bytes& input) {
     output.resize(size);
     return output;
 }
-Bytes png(uint32_t width = 1, uint32_t height = 1, unsigned depth = 8, unsigned type = 6, Bytes palette = {}, Bytes alpha = {}) {
+Bytes png(uint32_t width = 1, uint32_t height = 1, unsigned depth = 8, unsigned type = 6, Bytes palette = {}, Bytes alpha = {},
+          std::uint16_t alpha16 = 65535) {
     Bytes output{137, 80, 78, 71, 13, 10, 26, 10};
     Bytes header;
     be32(header, width); be32(header, height);
@@ -33,7 +34,8 @@ Bytes png(uint32_t width = 1, uint32_t height = 1, unsigned depth = 8, unsigned 
     chunk(output, "IHDR", header);
     if (!palette.empty()) chunk(output, "PLTE", palette);
     if (!alpha.empty()) chunk(output, "tRNS", alpha);
-    const Bytes pixels = type == 3 ? Bytes{0, 1} : depth == 16 ? Bytes{0, 255, 255, 0, 0, 0, 0, 255, 255} : Bytes{0, 255, 0, 0, 255};
+    const Bytes pixels = type == 3 ? Bytes{0, 1} : depth == 16 ? Bytes{0, 255, 255, 0, 0, 0, 0,
+        static_cast<unsigned char>(alpha16 >> 8), static_cast<unsigned char>(alpha16)} : Bytes{0, 255, 0, 0, 255};
     chunk(output, "IDAT", compressed(pixels));
     chunk(output, "IEND", {});
     return output;
@@ -58,6 +60,23 @@ bool decode(const Bytes& bytes, bool transparent = false) {
     cairo_surface_destroy(image);
     return ok;
 }
+bool upload(const Bytes& bytes, std::uint32_t expected) {
+    Input input{bytes};
+    auto* image = cairo_image_surface_create_from_png_stream(read, &input);
+    auto* pixels = Hyprveil::Png::uploadPixels(image);
+    // Drop the decoder first to verify that the upload reference owns its data.
+    cairo_surface_destroy(image);
+    bool ok = pixels && cairo_surface_status(pixels) == CAIRO_STATUS_SUCCESS &&
+        cairo_image_surface_get_format(pixels) == CAIRO_FORMAT_ARGB32 &&
+        cairo_image_surface_get_stride(pixels) == 4;
+    if (ok) {
+        std::uint32_t pixel = 0;
+        std::memcpy(&pixel, cairo_image_surface_get_data(pixels), sizeof(pixel));
+        ok = pixel == expected;
+    }
+    if (pixels) cairo_surface_destroy(pixels);
+    return ok;
+}
 } // namespace
 
 int main() {
@@ -72,6 +91,15 @@ int main() {
         const auto palette = png(1, 1, 8, 3, {255, 0, 0, 0, 0, 255}, {255, 0});
         check(decode(Hyprveil::Png::pixelOnly(palette), true), "palette transparency must survive");
         check(decode(Hyprveil::Png::pixelOnly(png(1, 1, 16))), "small 16-bit image must decode");
+        check(upload(Hyprveil::Png::pixelOnly(simple), 0xffff0000), "8-bit upload preserves opaque red and owns its pixels");
+        check(upload(Hyprveil::Png::pixelOnly(png(1, 1, 16)), 0xffff0000), "16-bit floating-point RGBA normalizes to opaque red upload bytes");
+        check(upload(Hyprveil::Png::pixelOnly(png(1, 1, 16, 6, {}, {}, 0x8080)), 0x80800000), "16-bit upload preserves premultiplied partial alpha");
+        check(upload(Hyprveil::Png::pixelOnly(png(1, 1, 16, 6, {}, {}, 0)), 0), "16-bit upload preserves transparent pixels");
+        check(upload(Hyprveil::Png::pixelOnly(palette), 0), "upload preserves indexed transparency");
+        check(!Hyprveil::Png::uploadPixels(nullptr), "missing decoded image cannot upload");
+        auto* invalidSurface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, -1, 1);
+        check(!Hyprveil::Png::uploadPixels(invalidSurface), "failed decoded surface cannot upload");
+        cairo_surface_destroy(invalidSurface);
 
         Bytes metadata(simple.begin(), simple.begin() + 33);
         Bytes text{'k', 0, 0};

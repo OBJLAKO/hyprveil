@@ -121,19 +121,7 @@ def prepare(args):
                 continue
             atomic(target / name, contents, 0o600)
         controller.verify_identity()
-        controller.remove_marker()
-        expires = int(time.time()) + 7200
-        text = f"hyprveil-live-v1\n{args.pid}\n{args.signature}\nblack\n{expires}\n"
-        directory = service.check_directory(controller.runtime)
-        try:
-            fd = os.open(controller.marker_path().name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory)
-            with os.fdopen(fd, "w") as handle:
-                os.fchmod(handle.fileno(), 0o600)
-                handle.write(text)
-                handle.flush()
-                os.fsync(handle.fileno())
-        finally:
-            os.close(directory)
+        expires = controller.create_marker(lifetime=7200)
         state["marker_expires"] = expires
         try:
             atomic(STATE, encoded(state), 0o600)

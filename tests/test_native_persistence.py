@@ -112,7 +112,7 @@ class NativePersistenceTests(unittest.TestCase):
         self.assertFalse(any(command[:2] == ("hyprveil", "appearance") and len(command) > 2 for command in self.controller.commands))
 
     def prepare_reparsed_load(self, mode="spoiler"):
-        values = dict(self.values(), mode=mode, variant="telegram", color="#abcdef", grain=17, speed=0)
+        values = dict(self.values(), mode=mode, variant="signal", color="#abcdef", grain=17, speed=0)
         self.source.write_bytes(service.lua_settings_block(values).encode() + b"\n-- retained user customization\n")
         self.controller.loaded = False
         self.controller.reparse_on_load = True
@@ -124,7 +124,7 @@ class NativePersistenceTests(unittest.TestCase):
         self.assertNotIn("ready-black", [call.args[0] for call in phases.call_args_list])
         self.assertNotIn("healthy", [call.args[0] for call in phases.call_args_list])
         self.assertEqual(json.loads(service.read_private(self.controller.startup_path))["phase"], phase)
-        self.assertFalse((self.fixture.runtime / ".hyprveil-live-111").exists())
+        self.assertEqual((self.fixture.runtime / ".hyprveil-live-111").read_text().splitlines()[3:], ["cancelled", "0"])
         self.assertEqual(self.source.read_bytes(), source)
         self.assertEqual(self.fixture.config.read_bytes(), manifest)
 
@@ -150,7 +150,7 @@ class NativePersistenceTests(unittest.TestCase):
         self.assertEqual(self.source.read_bytes(), source)
         self.assertEqual(self.fixture.config.read_bytes(), manifest)
         self.assertEqual(json.loads(service.read_private(self.controller.startup_path))["phase"], "healthy")
-        self.assertFalse((self.fixture.runtime / ".hyprveil-live-111").exists())
+        self.assertEqual((self.fixture.runtime / ".hyprveil-live-111").read_text().splitlines()[3:], ["cancelled", "0"])
 
     def test_new_load_already_black_reloads_saved_lua_without_extra_mode_write(self):
         values, source, manifest = self.prepare_reparsed_load(mode="black")
@@ -238,6 +238,21 @@ class NativePersistenceTests(unittest.TestCase):
         self.source.write_text(self.source.read_text() + suffix)
         self.controller.run("configure", appearance={"grain": 22})
         self.assertTrue(self.source.read_text().endswith(suffix))
+
+    def test_old_lua_block_gains_known_icon_fields_and_canonical_variant_only(self):
+        source = self.source.read_text().replace('variant = "prism"', 'variant = "satin"')
+        source = source.replace('  icon = "eye",\n', '').replace('  icon_opacity = 75,\n', '')
+        source += '\n-- preserve this user customization\n'
+        self.source.write_text(source)
+        values = service.parse_lua_settings(self.source.read_bytes())[3]
+        self.assertEqual(values["variant"], "prism")
+        self.assertEqual(values["icon"], "eye")
+        self.controller.appearance.update(icon="shield", icon_opacity=39)
+        plan = self.controller.prepare_lua(self.controller.native("status"), color="#ABCDEF")
+        self.assertEqual(plan[2]["color"], "#abcdef")
+        self.assertEqual((plan[2]["icon"], plan[2]["icon_opacity"]), ("shield", 39))
+        self.assertTrue(plan[1].decode().endswith('-- preserve this user customization\n'))
+        self.assertIn(b'icon = "shield"', plan[1])
 
     def test_custom_expression_in_block_refuses_without_touching_state(self):
         self.source.write_text(self.source.read_text().replace("grain = 50", "grain = math.floor(50)"))

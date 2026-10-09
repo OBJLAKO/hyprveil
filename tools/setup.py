@@ -13,7 +13,7 @@ import service
 import upgrade
 
 PROJECT = Path(__file__).resolve().parents[1]
-TESTED_ABI = "efb50993780079460b0cbed1363e2166a2de1d9f_aq_0.15_hu_0.14_hg_0.5_hc_0.1_hlg_0.6"
+TESTED_ABI = service.TESTED_ABI
 
 
 def command(argv, timeout=180):

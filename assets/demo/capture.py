@@ -59,11 +59,11 @@ class Demo(Stress):
         shutil.copyfile(self.runtime / "hyprveil-local.png", local)
         baseline = self.geometry()
         visible = image_stats(local)
-        if not self.record("synthetic local document is visible and privacy remains enabled", visible["private_fraction"] > .001 and self.privacy()):
+        if not self.record("synthetic local document is visible and privacy remains enabled", visible["private_fraction"] > .001 and self.privacy())["ok"]:
             raise RuntimeError("local synthetic marker was not visible")
         frames = {}
-        for variant in ("satin", "telegram"):
-            self.ctl("hyprveil", "appearance", variant, "#a2d9c8", "65", "125", "28", "1", "96")
+        for variant in ("glass", "error404"):
+            self.ctl("hyprveil", "appearance", variant, "#ffffff", "50", "120", "35", "0", "96", "none", "75")
             variant_frames = []
             started = time.monotonic()
             for index in range(24):
@@ -77,11 +77,11 @@ class Demo(Stress):
                     raise RuntimeError("protected demo capture exposed marker or changed window policy")
                 variant_frames.append(path)
             unique = len({hashlib.sha256(p.read_bytes()).hexdigest() for p in variant_frames})
-            if not self.record(variant + " real GPU frames animate with no synthetic private marker", unique > 20, frames=len(variant_frames), unique=unique):
+            if not self.record(variant + " real GPU frames animate with no synthetic private marker", unique > 20, frames=len(variant_frames), unique=unique)["ok"]:
                 raise RuntimeError("GPU demo did not animate")
             frames[variant] = [p.name for p in variant_frames]
         self.report.update(demo_frames=frames, local_frame=local.name,
-                           demo_settings=dict(color="#a2d9c8", grain=65, speed=125, darkness=28, eye=True, eye_size=96),
+                           demo_settings=dict(color="#ffffff", grain=50, speed=120, darkness=35, eye=False, eye_size=96, icon="none", icon_opacity=75),
                            synthetic_content="GTK cairo notes fixture; unique pink marker absent from all protected captures",
                            native_frame_size=[800, 500], capture_fps=10)
         self.report["ok"] = True

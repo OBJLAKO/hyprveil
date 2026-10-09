@@ -279,7 +279,7 @@ std::string command(eHyprCtlOutputFormat, std::string request) {
         if (path == gOldPath || oldPresent())
             throw std::runtime_error("upgrade guard: old module must be unloaded before handoff");
         const auto* next = g_pPluginSystem->getPluginByPath(path);
-        if (!next || next->m_name != "hyprveil" || next->m_version != "0.4.0")
+        if (!next || next->m_name != "hyprveil" || next->m_version != "0.5.0")
             throw std::runtime_error("upgrade guard: exact new module is not loaded");
         const auto [digest, file, btrfs] = ownedDigest(path);
         if (digest != pin)
@@ -327,8 +327,7 @@ APICALL EXPORT std::string PLUGIN_API_VERSION() { return HYPRLAND_API_VERSION; }
 
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     gHandle = handle;
-    if (std::string{__hyprland_api_get_hash()} != __hyprland_api_get_client_hash())
-        throw std::runtime_error("upgrade guard: exact compositor ABI mismatch");
+    Hyprveil::requireReviewedAbi(__hyprland_api_get_hash(), __hyprland_api_get_client_hash());
     admitSession();
     const auto plugins = g_pPluginSystem->getAllPlugins();
     const auto count = std::count_if(plugins.begin(), plugins.end(), [](const auto* item) { return item->m_name == "hyprveil"; });

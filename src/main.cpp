@@ -141,6 +141,7 @@ std::string gImageStatus = "not-loaded";
 SP<Render::ITexture> gImage;
 Hyprveil::Appearance gAppearance;
 bool gConfigReady = false;
+bool gInitialized = false;
 bool gConfigBatch = false;
 bool gModeDispatcher = false, gCycleDispatcher = false;
 bool gLuaConfigure = false, gLuaStatus = false, gLuaMode = false, gLuaCycle = false;
@@ -148,7 +149,15 @@ bool gLuaActivePrivacy = false, gLuaSetHidden = false, gLuaToggle = false, gLuaR
 lua_State* gConfigWriter = nullptr;
 std::vector<std::string> gRegisteredConfig;
 SP<CShader> gSpoilerShader;
-SP<Render::ITexture> gSpoilerEye;
+// These three content-free vector textures are uploaded once per plugin
+// lifetime. Shape/opacity changes reuse the cache without GPU allocation.
+constexpr std::array<std::string_view, 3> SPOILER_ICONS{"eye", "lock", "shield"};
+std::array<SP<Render::ITexture>, SPOILER_ICONS.size()> gSpoilerIcons;
+SP<Render::ITexture> spoilerIcon() {
+    for (std::size_t i = 0; i < SPOILER_ICONS.size(); ++i)
+        if (SPOILER_ICONS[i] == gAppearance.icon) return gSpoilerIcons[i];
+    return {};
+}
 
 std::string gSpoilerStatus = "not-loaded";
 std::uint64_t gSpoilerShaderAttempts = 0;
@@ -316,7 +325,7 @@ class SatinPass final : public IPassElement {
         shader->setUniformFloat3(SHADER_TINT, tint[0], tint[1], tint[2]);
         shader->setUniformFloat(SHADER_NOISE, m_appearance.grain / 100.F);
         shader->setUniformFloat(SHADER_BRIGHTNESS, m_appearance.darkness / 100.F);
-        shader->setUniformInt(SHADER_TEX_TYPE, m_appearance.variant == "telegram" ? 1 : 0);
+        shader->setUniformInt(SHADER_TEX_TYPE, m_appearance.shaderVariant());
         glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO));
         damage.forEachRect([&](const auto& rect) {
             gl->scissor(&rect, data.transformDamage);
@@ -412,7 +421,8 @@ SP<CShader> compileSpoilerShader(const char* fragment) {
 void prepareSpoiler(Renderer* renderer) {
     if (gSpoilerStatus == "black-fallback")
         return; // latch rejection for this plugin lifetime; never retry per frame
-    if (gSpoilerShader && gSpoilerShader->program() && gSpoilerEye && gSpoilerEye->ok())
+    if (gSpoilerShader && gSpoilerShader->program() &&
+        std::all_of(gSpoilerIcons.begin(), gSpoilerIcons.end(), [](const auto& texture) { return texture && texture->ok(); }))
         return;
     try {
         if (renderer->type() != Renderer::RT_GL || !Render::GL::g_pHyprOpenGL)
@@ -425,20 +435,24 @@ void prepareSpoiler(Renderer* renderer) {
         auto shader = compileSpoilerShader(fragment);
         if (!shader)
             throw std::runtime_error("synthetic shader unavailable");
-        auto* eye = Hyprveil::Spoiler::eye();
-        if (!eye)
-            throw std::runtime_error("synthetic eye unavailable");
-        Hyprutils::Utils::CScopeGuard destroyEye([eye]() { cairo_surface_destroy(eye); });
-        auto texture = renderer->createTexture(eye);
-        if (!texture || !texture->ok())
-            throw std::runtime_error("synthetic eye texture unavailable");
-        texture->m_imageDescription = NColorManagement::DEFAULT_SRGB_IMAGE_DESCRIPTION;
-        gSpoilerShader = shader;
-        gSpoilerEye = texture;
+        decltype(gSpoilerIcons) icons;
+        for (std::size_t i = 0; i < SPOILER_ICONS.size(); ++i) {
+            auto* pixels = Hyprveil::Spoiler::icon(SPOILER_ICONS[i]);
+            if (!pixels)
+                throw std::runtime_error("synthetic icon unavailable");
+            Hyprutils::Utils::CScopeGuard destroyPixels([pixels]() { cairo_surface_destroy(pixels); });
+            auto texture = renderer->createTexture(pixels);
+            if (!texture || !texture->ok())
+                throw std::runtime_error("synthetic icon texture unavailable");
+            texture->m_imageDescription = NColorManagement::DEFAULT_SRGB_IMAGE_DESCRIPTION;
+            icons[i] = std::move(texture);
+        }
+        gSpoilerShader = std::move(shader);
+        gSpoilerIcons = std::move(icons);
         gSpoilerStatus = "ready";
     } catch (...) {
         gSpoilerShader.reset();
-        gSpoilerEye.reset();
+        for (auto& icon : gSpoilerIcons) icon.reset();
         gSpoilerStatus = "black-fallback";
     }
 }
@@ -469,8 +483,12 @@ void requireSession() {
         gSession = "lab";
         return;
     }
+    // Standard plugin loading is authorized by Hyprland itself. Temporary
+    // controller markers are only a trial workflow, not a runtime dependency
+    // of hyprpm/config loading. Diagnostic readback remains lab-only.
     const auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-    Hyprveil::requireLiveMarker(runtime ? runtime : "", getpid(), g_pCompositor->m_instanceSignature, static_cast<std::uint64_t>(now));
+    Hyprveil::requireOptionalLiveMarker(runtime ? runtime : "", getpid(), g_pCompositor->m_instanceSignature,
+                                       static_cast<std::uint64_t>(now));
     gLiveSession = true;
     gSession = "live";
     gLabRuntime.clear();
@@ -869,9 +887,11 @@ void windowHook(Renderer* self, PHLWINDOW window, PHLMONITOR monitor, const Time
                     self->m_renderPass.add(makeUnique<SatinPass>(box, monitor->m_scale,
                         Hyprveil::Spoiler::seconds(static_cast<std::uint64_t>(milliseconds)), gSpoilerShader, gAppearance));
                     const double side = std::min({static_cast<double>(gAppearance.eyeSize) * monitor->m_scale, box.w * 0.72, box.h * 0.72});
-                    if (gAppearance.eye && side >= 12 && gSpoilerEye && gSpoilerEye->ok()) {
-                        const CBox eyeBox{box.pos() + (box.size() - Vector2D{side, side}) / 2.0, Vector2D{side, side}};
-                        self->m_renderPass.add(makeUnique<CTexPassElement>(CTexPassElement::SRenderData{.tex = gSpoilerEye, .box = eyeBox}));
+                    const auto icon = spoilerIcon();
+                    if (gAppearance.eye && gAppearance.iconOpacity > 0 && side >= 12 && icon && icon->ok()) {
+                        const CBox iconBox{box.pos() + (box.size() - Vector2D{side, side}) / 2.0, Vector2D{side, side}};
+                        self->m_renderPass.add(makeUnique<CTexPassElement>(CTexPassElement::SRenderData{
+                            .tex = icon, .box = iconBox, .a = gAppearance.iconOpacity / 100.F}));
                     }
                 }
             } else if (gMode == "image" && gImage && gImage->ok())
@@ -989,7 +1009,10 @@ void monitorHook(Frame* frame) {
                     // loadAsset() resolves packaged asset names, not arbitrary
                     // paths. Upload the bounded decoded snapshot only in the
                     // active capture GL context; failure remains a black mask.
-                    gImage = renderer->createTexture(image);
+                    auto* pixels = Hyprveil::Png::uploadPixels(image);
+                    Hyprutils::Utils::CScopeGuard destroyPixels([pixels]() { if (pixels) cairo_surface_destroy(pixels); });
+                    if (pixels)
+                        gImage = renderer->createTexture(pixels);
                     if (gImage && gImage->ok()) {
                         gImage->m_imageDescription = NColorManagement::DEFAULT_SRGB_IMAGE_DESCRIPTION;
                         gImageStatus = "ready";
@@ -1105,10 +1128,13 @@ class NativeString final : public Config::Lua::CLuaConfigString {
         const auto result = checked.set(m_field, std::string{bytes, size});
         if (!result)
             return {.errorCode=PARSE_ERROR_BAD_VALUE, .message=result.error()};
-        // Store canonical color in the same value read by hl.get_config.
-        if (m_field == "color") lua_pushlstring(state, checked.appearance.color.data(), checked.appearance.color.size());
+        // Store canonical color and legacy variant aliases in the same
+        // value read by hl.get_config/getoption and status.
+        const auto* canonical = m_field == "color" ? &checked.appearance.color :
+            m_field == "variant" ? &checked.appearance.variant : nullptr;
+        if (canonical) lua_pushlstring(state, canonical->data(), canonical->size());
         const auto parsed = CLuaConfigString::parse(state);
-        if (m_field == "color") lua_pop(state, 1);
+        if (canonical) lua_pop(state, 1);
         if (parsed.errorCode == PARSE_ERROR_OK) nativeConfigParsed();
         return parsed;
         } catch (...) {
@@ -1195,6 +1221,8 @@ NativeSettings readNativeConfiguration() {
     result.appearance.darkness = nativeValue("darkness")->asInt();
     result.appearance.eye = nativeValue("eye")->asInt();
     result.appearance.eyeSize = nativeValue("eye_size")->asInt();
+    result.appearance.icon = nativeValue("icon")->asString();
+    result.appearance.iconOpacity = nativeValue("icon_opacity")->asInt();
     return result;
 }
 
@@ -1250,16 +1278,18 @@ std::expected<void, std::string> updateNativeConfiguration(const NativePatch& pa
 }
 
 void pushNativeStatus(lua_State* state) {
-    lua_createtable(state, 0, 4);
+    lua_createtable(state, 0, 6);
     lua_pushinteger(state, 1); lua_setfield(state, -2, "config_api");
     lua_pushlstring(state, gMode.data(), gMode.size()); lua_setfield(state, -2, "mode");
     lua_pushlstring(state, gImagePath.data(), gImagePath.size()); lua_setfield(state, -2, "image_path");
     lua_createtable(state, 0, 7);
     for (const auto& [field, value] : NativeSettings{.appearance=gAppearance}.values()) {
-        if (field == "mode" || field == "image_path") continue;
+        if (field == "mode" || field == "image_path" || field == "icon" || field == "icon_opacity") continue;
         pushNativeValue(state, value); lua_setfield(state, -2, field.c_str());
     }
     lua_setfield(state, -2, "appearance");
+    lua_pushlstring(state, gAppearance.icon.data(), gAppearance.icon.size()); lua_setfield(state, -2, "icon");
+    lua_pushinteger(state, gAppearance.iconOpacity); lua_setfield(state, -2, "icon_opacity");
 }
 
 int luaNativeStatus(lua_State* state) {
@@ -1288,8 +1318,8 @@ int luaNativeConfigure(lua_State* state) {
         NativePatch patch;
         lua_pushnil(state);
         while (lua_next(state, 1) != 0) {
-            if (patch.size() >= 9 || lua_type(state, -2) != LUA_TSTRING)
-                return fail("hyprveil.configure requires at most nine string keys");
+            if (patch.size() >= Hyprveil::NativeConfig::FIELDS.size() || lua_type(state, -2) != LUA_TSTRING)
+                return fail("hyprveil.configure requires at most eleven string keys");
             std::size_t size = 0;
             const char* bytes = lua_tolstring(state, -2, &size);
             if (size > 16) return fail("unknown Hyprveil setting");
@@ -1479,9 +1509,10 @@ int luaResetSharing(lua_State* state) {
 void registerNativeConfiguration() {
     const auto manager = Config::Lua::mgr();
     if (!manager) throw std::runtime_error("hyprveil: this configuration API requires Lua Hyprland");
-    constexpr std::array<const char*, 9> names{"plugin:hyprveil:mode", "plugin:hyprveil:image_path", "plugin:hyprveil:variant",
+    constexpr std::array<const char*, 11> names{"plugin:hyprveil:mode", "plugin:hyprveil:image_path", "plugin:hyprveil:variant",
         "plugin:hyprveil:color", "plugin:hyprveil:grain", "plugin:hyprveil:speed", "plugin:hyprveil:darkness",
-        "plugin:hyprveil:eye", "plugin:hyprveil:eye_size"};
+        "plugin:hyprveil:eye", "plugin:hyprveil:eye_size", "plugin:hyprveil:icon", "plugin:hyprveil:icon_opacity"};
+    static_assert(names.size() == Hyprveil::NativeConfig::FIELDS.size());
     const auto defaults = NativeSettings{}.values();
     for (const auto* field : Hyprveil::NativeConfig::FIELDS)
         if (manager->m_configValues.contains("plugin.hyprveil." + std::string{field}))
@@ -1518,10 +1549,29 @@ void registerNativeConfiguration() {
 }
 
 void cleanup() {
+    const bool preserveEffectivePrivacy = gInitialized;
+    gInitialized = false;
     gConfigReady = false;
     // Revoke this plugin's temporary shares while its native hooks and window
     // objects still exist. Unloading never leaves a forgotten false override.
     resetSharingChoices();
+    if (preserveEffectivePrivacy && g_pCompositor && !g_pCompositor->m_isShuttingDown) {
+        // The native fallback masks each window's own property, without this
+        // plugin's ancestry or orphan retention. Preserve all effective private
+        // mapped windows before removing interception, including children whose
+        // private parent is still alive. Promotion is monotonic and survives
+        // ordinary rule refreshes through the native SetProp priority.
+        for (const auto& window : Desktop::windowState()->windows()) {
+            if (!window || !window->m_isMapped || !window->m_ruleApplicator || !privateWindow(window) ||
+                window->m_ruleApplicator->noScreenShare().valueOrDefault())
+                continue;
+            auto& property = window->m_ruleApplicator->noScreenShare();
+            property.set(true, Desktop::Types::PRIORITY_SET_PROP);
+            try { window->m_ruleApplicator->propertiesChanged(Desktop::Rule::RULE_PROP_ALL); }
+            catch (...) { property.set(true, Desktop::Types::PRIORITY_SET_PROP); }
+        }
+        try { capturePolicyChanged(); } catch (...) {}
+    }
     gConfigPreReloadListener.reset();
     if (gLuaConfigure) HyprlandAPI::removeLuaFunction(gHandle, "hyprveil", "configure");
     if (gLuaStatus) HyprlandAPI::removeLuaFunction(gHandle, "hyprveil", "status");
@@ -1580,7 +1630,7 @@ void cleanup() {
     if (g_pHyprRenderer)
         g_pHyprRenderer->m_renderPass.removeAllOfType(Hyprveil::Spoiler::PASS_NAME);
     gSpoilerShader.reset();
-    gSpoilerEye.reset();
+    for (auto& icon : gSpoilerIcons) icon.reset();
     gLoadedImagePath.clear();
     if (gCommand) {
         HyprlandAPI::unregisterHyprCtlCommand(gHandle, gCommand);
@@ -1700,12 +1750,19 @@ std::string command(eHyprCtlOutputFormat, std::string request) {
         updated = updateNativeConfiguration({{"mode", std::string{"spoiler"}}});
     }
     else if (request.starts_with("hyprveil appearance ")) {
-        const auto value = Hyprveil::Appearance::parse(std::string_view{request}.substr(20));
+        const auto fields = std::string_view{request}.substr(20);
+        const auto value = Hyprveil::Appearance::parse(fields);
         if (!value)
-            return R"({"error":"appearance requires variant hex-color grain[0..100] speed[0..200] darkness[0..100] eye[0|1] eye-size[40..128]"})";
+            return R"({"error":"appearance requires variant hex-color grain[0..100] speed[0..200] darkness[0..100] eye[0|1] eye-size[40..128] [icon[eye|lock|shield|none] icon-opacity[0..100]]"})";
         auto patch = NativeSettings{.appearance=*value}.values();
         patch.erase("mode");
         patch.erase("image_path");
+        // Older callers know only the original seven appearance fields.
+        // Preserve a separately selected shape and opacity on those updates.
+        if (std::count(fields.begin(), fields.end(), ' ') == 6) {
+            patch.erase("icon");
+            patch.erase("icon_opacity");
+        }
         updated = updateNativeConfiguration(patch);
     }
     else if (request == "hyprveil appearance") {
@@ -1739,7 +1796,8 @@ std::string command(eHyprCtlOutputFormat, std::string request) {
            (gDumpPending ? "pending" : gDumpResult) + "\",\"image_status\":\"" + gImageStatus +
            "\",\"spoiler_status\":\"" + gSpoilerStatus + "\",\"spoiler_shader_attempts\":" +
            std::to_string(gSpoilerShaderAttempts) + ",\"spoiler_animation_armed\":" +
-           (gSpoilerTimer && gSpoilerTimer->armed() ? "true" : "false") + ",\"appearance\":" + gAppearance.json() + "}";
+           (gSpoilerTimer && gSpoilerTimer->armed() ? "true" : "false") + ",\"appearance\":" + gAppearance.json() +
+           ",\"icon\":" + quotedJson(gAppearance.icon) + ",\"icon_opacity\":" + std::to_string(gAppearance.iconOpacity) + "}";
 }
 } // namespace
 
@@ -1765,8 +1823,7 @@ APICALL EXPORT std::string PLUGIN_API_VERSION() {
 
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     gHandle = handle;
-    if (std::string{__hyprland_api_get_hash()} != __hyprland_api_get_client_hash())
-        throw std::runtime_error("hyprveil: exact Hyprland ABI mismatch; rebuild for this compositor");
+    Hyprveil::requireReviewedAbi(__hyprland_api_get_hash(), __hyprland_api_get_client_hash());
     // Validate the ABI before reading any compositor object fields.
     requireSession();
 
@@ -1909,11 +1966,12 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         g_pEventLoopManager->addTimer(gSpoilerTimer);
         gEnabled = true;
         gConfigReady = true;
+        gInitialized = true;
     } catch (...) {
         cleanup();
         throw;
     }
-    return {"hyprveil", "Capture-only privacy with native typed Lua configuration; exact Hyprland ABI required", "OBJLAKO", "0.4.0"};
+    return {"hyprveil", "Capture-only privacy with native typed Lua configuration; exact Hyprland ABI required", "OBJLAKO", "0.5.0"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {

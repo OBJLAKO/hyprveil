@@ -12,6 +12,10 @@ jobs:
   offline:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [false, true]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -23,4 +27,14 @@ jobs:
       - name: Python controller and harness boundaries
         run: /usr/bin/python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Standalone C++ boundaries
+        if: ${{ !matrix.sanitizer }}
         run: make test-session-guard test-png-guard test-privacy-policy test-spoiler-pattern test-appearance test-native-config
+      - name: C++ memory and undefined-behavior checks
+        if: ${{ matrix.sanitizer }}
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: >-
+          make CXXFLAGS='-O1 -g -std=c++23 -Wall -Wextra -fno-omit-frame-pointer -fsanitize=address,undefined'
+          test-session-guard test-png-guard test-privacy-policy
+          test-spoiler-pattern test-appearance test-native-config

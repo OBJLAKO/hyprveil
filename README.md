@@ -1,84 +1,44 @@
 <div align="center">
-
 <img src="assets/hero.svg" alt="Hyprveil — keep your windows, choose what you share" width="960">
 
-**Capture privacy for Hyprland. Your workspace stays yours.**
+**Keep your workspace. Choose what you share.**
 
 [![Hyprland](https://img.shields.io/badge/Hyprland-0.56.2-adcfc8?style=flat-square&labelColor=161c22)](docs/HOST-SETUP.md)
-[![Version](https://img.shields.io/badge/preview-v0.4.0-ccd4de?style=flat-square&labelColor=161c22)](https://github.com/OBJLAKO/hyprveil/releases)
 [![Tests](https://github.com/OBJLAKO/hyprveil/actions/workflows/tests.yml/badge.svg)](https://github.com/OBJLAKO/hyprveil/actions/workflows/tests.yml)
 [![License](https://img.shields.io/badge/license-MIT-ccd4de?style=flat-square&labelColor=161c22)](LICENSE)
 
-[Quick start](#quick-start) · [Lua configuration](docs/CONFIGURATION.md) · [Safety & compatibility](SECURITY.md) · [Omarchy companion](https://github.com/OBJLAKO/omarchy-hyprveil)
-
+[Install](#install) · [Styles](#choose-your-style) · [Configure](docs/CONFIGURATION.md) · [Omarchy panel](https://github.com/OBJLAKO/omarchy-hyprveil) · [Compatibility](docs/HOST-SETUP.md)
 </div>
 
-Hyprveil keeps private windows visible on your desktop while changing their appearance in **compositor screen captures**. Hide them completely, cover them with black, or replace them with a shimmering, fully opaque spoiler. Windows stay in place; your layout stays intact.
+Private windows stay visible on your desktop while Hyprveil changes what appears in **compositor screen captures**. Omit a window, cover it with black, use an opaque animated design, or supply a PNG. Your windows and layout stay in place.
 
 <div align="center">
-<img src="assets/demo.gif" alt="Synthetic Hyprland capture demonstrating an animated privacy spoiler" width="960">
-<br><sub>Real Hyprveil rendering in an isolated compositor. Every window in the demo is synthetic.</sub>
+<img src="assets/demo.gif" alt="Synthetic Hyprland capture demonstrating capture-only privacy" width="960">
+<br><sub>Real compositor rendering. All windows and contents in the demo are synthetic.</sub>
 </div>
 
-## What you get
+## Install
 
-- **Four capture modes.** Omission, black mask, animated spoiler, or your own PNG.
-- **Two spoiler styles.** Soft Satin shimmer and Telegram-inspired drifting dust, with a centered crossed-out eye.
-- **Native Hyprland configuration.** Ordinary Lua settings, window rules and bindings, plus a small CLI.
-- **Live customization.** Tint, grain, motion speed, darkness, eye visibility and eye size.
-- **Focused-window control.** Hide, share temporarily, or revoke temporary sharing through the public Lua API.
-- **Independent core.** Works on Hyprland without Omarchy. The optional panel lives in [its own repository](https://github.com/OBJLAKO/omarchy-hyprveil).
+Hyprveil is a native **hyprpm plugin**. Omarchy is optional. The current compatibility target is **Hyprland 0.56.2 with its reviewed dependency ABI**; other ABIs are refused before hooks are installed.
 
-The spoiler is generated from synthetic light and grain. Protected window pixels are never used to make a blurred preview.
-
-## Quick start
-
-**Preview release:** the installer currently supports the exact reviewed **Hyprland 0.56.2 ABI**. It checks compatibility before changing configuration. Other compositor versions are refused. See [requirements and installation](docs/HOST-SETUP.md).
-
-With matching Hyprland development headers, a C++23 compiler, `make`, `pkg-config`, Python 3, Lua/`luac`, and Cairo, OpenSSL, zlib and GLES development libraries installed:
+With [hyprpm's build dependencies](https://wiki.hypr.land/Plugins/Using-Plugins/) and a C++23 compiler, Make, pkg-config, Cairo, zlib and GLES development files available:
 
 ```sh
-git clone https://github.com/OBJLAKO/hyprveil.git
-cd hyprveil
-python3 tools/setup.py install
+hyprpm add https://github.com/OBJLAKO/hyprveil
+hyprpm enable hyprveil
+hyprpm reload
 ```
 
-The installer builds the plugin, checks its safety boundaries, computes the required admission pins and saves backups. **First installation activates after logging out and back in.** A supported, reviewed predecessor can update in the running session through a protected capture gate.
-
-Then choose a style:
-
-```sh
-hyprveil spoiler
-hyprveil configure --variant telegram --color '#adcfc8' --grain 35 --speed 70
-```
-
-To return to complete omission:
-
-```sh
-hyprveil omit
-```
-
-## Make it yours
-
-Edit `~/.config/hypr/hyprveil-settings.lua`, or configure the plugin in your normal Hyprland Lua files:
+For autoload, add this to your Hyprland Lua configuration:
 
 ```lua
-local _, missing = hl.get_config("plugin.hyprveil.mode")
-if not missing then
-  hl.config({ plugin = { hyprveil = {
-    mode = "spoiler",
-    variant = "satin",       -- "satin" or "telegram"
-    color = "#adcfc8",
-    grain = 35,              -- 0–100
-    speed = 70,              -- 0–200; 0 freezes motion
-    darkness = 50,           -- 0–100
-    eye = true,
-    eye_size = 80,           -- 40–128 logical pixels
-  } } })
-end
+hl.permission("^/usr/(bin|local/bin)/hyprpm$", "plugin", "allow")
+hl.on("hyprland.start", function() hl.exec_cmd("hyprpm reload") end)
 ```
 
-Protect an application through a regular window rule:
+Permission changes take effect on the next login. An interactive permission prompt may appear before then. If you already autoload hyprpm, keep your existing startup entry.
+
+Protect an application with an ordinary window rule:
 
 ```lua
 hl.window_rule({
@@ -87,51 +47,116 @@ hl.window_rule({
 })
 ```
 
-Choose unused keys for hide/show and temporary-sharing reset:
+Or choose an unused key to toggle the focused window:
 
 ```lua
 hl.bind("SUPER + ALT + H", function()
   local p = hl.plugin.hyprveil
   if p and p.toggle then p.toggle() end
-end, { description = "Hide/show focused window in capture" })
-
-hl.bind("SUPER + ALT + SHIFT + H", function()
-  local p = hl.plugin.hyprveil
-  if p and p.reset_sharing then p.reset_sharing() end
-end, { description = "Revoke temporary capture sharing" })
+end, { description = "Hide/show focused window in screen sharing" })
 ```
 
-CLI changes persist to the managed Lua settings file. Runtime Lua calls affect the current session. Partial updates preserve other actual settings. [Configuration reference →](docs/CONFIGURATION.md)
+**Already using the old installer?** Follow the [cold-login migration](docs/HOST-SETUP.md#migrate-from-the-old-installer) before enabling hyprpm. Two competing loaders must not manage the same plugin.
 
-| Command | Action |
+## Choose your style
+
+| Style | Character |
 | --- | --- |
-| `hyprveil toggle` | Hide or share the focused window |
-| `hyprveil hide` / `hyprveil show` | Set an explicit focused-window choice |
-| `hyprveil reset-sharing` | Revoke temporary sharing created by Hyprveil |
-| `hyprveil spoiler` / `omit` / `black` | Select and save a capture mode |
-| `hyprveil configure --eye off --speed 0` | Update appearance without changing mode |
-| `hyprveil reload-config` | Reload Lua and verify native settings |
-| `hyprveil status` | Inspect the actual loaded state |
+| `prism` | Moving angular light facets |
+| `signal` | Retro scan lines and a moving sweep |
+| `aurora` | Broad, flowing ribbons of light |
+| `contour` | Fine topographic curves |
+| `radar` | Circular sonar sweep and a crisp grid |
+| `matte` | Still mineral texture, without animation |
+| `error404` | A bold 404 card with animated broadcast glitches |
+| `matrix` | Falling glyphs and bright column heads |
+| `anonymous` | A stylized mask with a moving scan glow |
+| `glass` | Floating liquid-glass forms and chromatic highlights |
 
-## Optional Omarchy panel
+![Ten native capture styles](assets/styles/gallery.png)
 
-[**omarchy-hyprveil**](https://github.com/OBJLAKO/omarchy-hyprveil) adds an appearance editor and a bar eye that shows the focused window's effective capture privacy. Left or middle click toggles privacy; right click opens the panel. English and Russian are supported. It uses Hyprveil's public API and CLI.
+![404, Matrix, Anonymous and Liquid Glass in motion](assets/styles/playful.gif)
 
-Once the native core is installed and active, add the panel through Omarchy's normal plugin manager:
+[See all ten styles in motion](assets/styles/motion.gif)
+
+All styles are synthetic and opaque. They never sample protected window pixels.
+Choose a clean eye, lock, shield or no icon; adjust its size and opacity. Tint,
+grain, darkness and motion speed are native settings. Set speed to zero for
+stillness; Matte stays still at every speed. Legacy `satin`, `telegram` and
+`grid` names remain accepted as aliases for Prism, Signal and Radar. `404`,
+`cmatrix`, `anon` and `liquid-glass` also work as convenient aliases.
+Liquid Glass refracts a generated environment, keeping the window underneath
+completely private.
+
+```lua
+local _, missing = hl.get_config("plugin.hyprveil.mode")
+if not missing then
+  hl.config({ plugin = { hyprveil = {
+    mode = "spoiler",
+    variant = "aurora",
+    color = "#a7c4d9",
+    grain = 35,
+    speed = 70,
+    darkness = 50,
+    eye = true,
+    eye_size = 80, -- icon size, retained for compatibility
+    icon = "shield",
+    icon_opacity = 75,
+  } } })
+end
+```
+
+Use your regular Lua config, or copy the [editable settings example](examples/hyprveil-settings.lua) to `~/.config/hypr/hyprveil-settings.lua` and load it with `dofile`. The panel and optional CLI can save changes to its literal settings block. Without that file, their changes affect the current session and are marked as temporary. See the [complete native configuration reference](docs/CONFIGURATION.md).
+
+## Optional controls
+
+**Omarchy:** add the companion through the regular plugin manager:
 
 ```sh
 omarchy plugin add https://github.com/OBJLAKO/omarchy-hyprveil.git --enable
 ```
 
-The panel manages this engine; the engine protects the compositor capture scene. [Panel setup, preview and removal →](https://github.com/OBJLAKO/omarchy-hyprveil#install)
+On first use, its setup action opens an interactive terminal installer, following
+the Omarchy Liquid Glass workflow. It installs the reviewed core through
+hyprpm and prepares backed-up Lua settings. If the core is already configured,
+the panel uses it directly. Its selective loader activates only Hyprveil’s
+validated hyprpm artifact, preserving unrelated manually loaded plugins.
+
+The panel includes its own native API client. No separate controller installation is required. Left or middle click toggles focused-window privacy; right click opens the appearance editor. English and Russian are supported.
+
+**CLI:** from a source checkout, optionally run `make install-cli`. This installs a user-local Python client without loading or rebuilding the plugin:
+
+```sh
+hyprveil status
+hyprveil spoiler
+hyprveil configure --variant contour --color '#a7c4d9' --speed 40
+hyprveil toggle
+hyprveil reset-sharing
+```
+
+Native Lua functions and `hyprctl hyprveil status` work without the CLI. hyprpm owns module installation, loading and updates.
+
+## Updates and compatibility
+
+```sh
+hyprpm update
+hyprpm reload
+```
+
+Stop active screen sharing before updating/reloading native plugins. While the
+module is unloaded, captures use Hyprland's native renderer; third-party FX can
+have their own masking limits. The current module preserves mapped inherited
+privacy as native window properties before teardown.
+
+The native module and build probe both enforce the reviewed ABI. A supported release is pinned to a reviewed source commit in `hyprpm.toml`. New compositor releases need a compatibility review and the synthetic rendering suite; changing a version label does not establish support.
+
+Unloading revokes temporary sharing and transfers inherited window privacy to native `no_screen_share` properties. The native fallback uses black replacement. Those protective properties can remain after reload until an explicit window privacy action changes them.
 
 ## Know the boundary
 
-Hyprveil protects the compositor capture paths covered by its renderer. **Direct KMS/DRM recording bypasses that renderer and is not protected.** Use a compositor or portal capture path for this feature.
+Hyprveil covers compositor-mediated capture. **Direct KMS/DRM recording bypasses it.** It cannot retract frames already delivered to another application, protect against an equally privileged native plugin, or guarantee every driver and capture client. Protected direct-window captures, locking, unsupported output transforms and rendering failure use black replacement.
 
-The mask is always opaque. Protected direct-window captures, screen locking, unsupported output transforms and shader failure use black replacement. Popup and inherited privacy have dedicated regression coverage. Window decorations and local effects stay with Hyprland; Hyprveil changes the capture scene.
-
-This release has a deliberately narrow ABI support range. Cold login, arbitrary drivers, every capture client and every third-party plugin are not covered by the saved validation. Read the [security policy](SECURITY.md), [technical review](docs/REVIEW.md) and [validation matrix](docs/VALIDATION.md) before relying on it.
+Read the [security scope](SECURITY.md), [technical review](docs/REVIEW.md), and [validation matrix](docs/VALIDATION.md). Tests use disposable compositors and synthetic content; a successful command is never treated as evidence of pixel privacy.
 
 ## Development
 
@@ -142,8 +167,6 @@ make test-session-guard test-png-guard test-privacy-policy \
      test-spoiler-pattern test-appearance test-native-config
 ```
 
-Native capture tests run in explicitly marked isolated Hyprland sessions with synthetic windows. [Testing guide](docs/TESTING.md) · [Contributing](CONTRIBUTING.md)
+[Testing guide](docs/TESTING.md) · [Contributing](CONTRIBUTING.md) · [MIT license](LICENSE)
 
-If Hyprveil improves your screen-sharing setup, a star helps other Hyprland users find it. Bug reports with a compositor version and a synthetic reproduction are especially useful.
-
-[MIT license](LICENSE) · Created by [OBJLAKO](https://github.com/OBJLAKO)
+Created by [OBJLAKO](https://github.com/OBJLAKO). Synthetic reproductions and compatibility reports help make Hyprveil useful on more desktops.

@@ -13,8 +13,8 @@ frames or isolate application buffers from the compositor process. Direct
 KMS/DRM recording, an application capturing itself and a hostile same-user
 process are outside this boundary.
 
-A native plugin runs with compositor privileges. Owned admission markers,
-ABI checks and socket attestation prevent accidental cross-session loading;
+A native plugin runs with compositor privileges. Reviewed ABI checks and
+controller socket attestation prevent accidental incompatible control;
 they are not a security boundary against a compromised same-user process.
 Other native plugins can draw arbitrary textures. Evidence for one FX build
 cannot establish safety of unrelated render extensions.
@@ -31,12 +31,15 @@ cannot establish safety of unrelated render extensions.
 | Background blur | Local blur and cached matte textures can contain private pixels. | Remove pre-blur and disable background blur in sanitized surface, rect, texture and transformed-window passes; discard cached blur/matte references. |
 | Locks and outputs | Alternate capture rendering could acknowledge a lock surface or rely on unverified transform bounds. | Return opaque black without rendering/acknowledging lock surfaces; deny rotated and mirrored captures. |
 | Auxiliary surfaces | Closing snapshots, drag icons and IME preedit lack reliable private-owner metadata. | Conservatively omit those capture passes; local rendering remains ordinary. |
+| Shader portability | Default fragment integer precision truncated packed glyphs; signed-base `pow(x, 2)` has undefined results in GLSL ES. | Explicit high-precision integers, bounded bit shifts and multiplication for signed squares; ES 3 validation plus native small/fractional and 1080p renders. |
 | Spoiler resources | Shader assertions, repeated failed allocation or teardown callbacks could terminate the compositor. | Bounded private GL compile/link with required attribute/uniform checks and RAII cleanup; one-shot failure latch to black; remove custom passes before resource/vtable unload with the GL context current; stop animation timers/listeners. |
 | Native configuration | Generic plugin conversion lost strict type/range validators; partial failure could restore an unsafe mode. | Typed parser wrappers, atomic validated patches and a registered black fail-safe. Invalid Lua/file settings never authorize original private rendering. |
 | Window actions | Delayed actions can target changed focus or a reused address. | Atomically verify focused mapped window, canonical address and immutable decimal ID. Refuse inherited sharing. Track at most 4096 weak temporary-share records with original native-property priority. |
 | Share reset | Reset could overwrite later user choices or suppress future privacy rules on public windows. | Record only protected windows shared by this API; public false is a no-op. Any later explicit native setter relinquishes ownership. Restore prior value/absence only while the owned false override still applies. |
-| Online update | Unload/load loses orphan retention and exposes a replacement gap. | Exact predecessor and target pins; block all capture commits through handoff; transfer weak identities in verified black mode; release only after successful adoption. Failure keeps the guard held. |
-| Controller/install | Stale state, symlinks or concurrent edits could select another release or discard settings. | Bounded no-follow reads, exact process/socket/ELF checks, private atomic files, compare-and-set native configuration, literal-block persistence and rollback limited to files still matching this transaction. |
+| Standard reload | Native fallback does not follow private ancestry after unload. | Before removing hooks, promote every mapped effectively private child/orphan to native `no_screen_share=true` at manual priority; revoke owned temporary shares first. Promotion persists until an explicit window action. |
+| Legacy protected update | An old predecessor loses orphan retention and exposes a replacement gap. | Exact predecessor and target pins; freeze both candidate binaries before mutation; block capture commits through handoff; transfer weak identities in black mode; release only after successful adoption. Failure keeps the guard held. |
+| Controller/install | Stale state, symlinks or concurrent edits could select another release or discard settings. | Bounded no-follow reads and IPC streams, exact process/socket identity, private atomic files, compare-and-set native configuration, literal-block persistence and rollback limited to files still matching this transaction. Legacy installation additionally attests compositor/release ELF. |
+| Delayed legacy consent | Removing a trial marker after timeout could make late consent look like an ordinary hyprpm load. | An existing trial marker always takes the strict admission path. Cancellation leaves a validated tombstone until explicit rearming or runtime cleanup; normal hyprpm loads create no marker. |
 
 ### PNG boundary
 
@@ -45,6 +48,8 @@ in Cairo. The essential-chunk sanitizer checks CRC and stream structure and
 strips unused ancillary metadata before decode. Limits are 16 MiB encoded,
 8192 pixels per axis, 16,777,216 pixels, 64 MiB decoded and 16,384 chunks.
 The decoded-byte check accounts for Cairo's larger 16-bit representation.
+Before GPU upload, floating-point/16-bit decoded surfaces are converted to
+premultiplied ARGB32, matching the native texture uploader's byte format.
 Invalid input produces black replacement. The controller preflight follows
 the same bounds.
 
@@ -67,8 +72,11 @@ Inherited/orphan protection belongs to the loaded plugin and map lifetime.
 A late load cannot infer a parent that already disappeared; deliberate
 unparenting can end ordinary inheritance. A successful explicit native false
 setter releases orphan retention, while a still-private ancestor remains
-protective. Managed upgrades preserve the retained weak identities. Ordinary
-unload restores native behavior and removes plugin inheritance.
+protective. The legacy protected update preserves retained weak identities.
+Ordinary unload promotes mapped effective privacy to native properties before
+removing plugin inheritance. Future children created while the plugin is
+absent have only Hyprland's native policy. Unload also returns capture to the
+native renderer, including its separately measured FX limitation.
 
 ## Remaining limits
 

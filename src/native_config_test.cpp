@@ -7,7 +7,17 @@
 using namespace Hyprveil::NativeConfig;
 int main() {
     const Settings defaults;
-    assert(defaults.mode == "black" && defaults.imagePath.empty() && defaults.values().size() == 9);
+    assert(defaults.mode == "black" && defaults.imagePath.empty() && defaults.values().size() == 11);
+    assert(defaults.appearance.icon == "eye" && defaults.appearance.iconOpacity == 75);
+    for (const auto shape : {"eye", "lock", "shield", "none"}) {
+        const auto icon = defaults.patched({{"icon", std::string{shape}}, {"icon_opacity", std::int64_t{0}}, {"eye", false}});
+        assert(icon && icon->appearance.icon == shape && icon->appearance.iconOpacity == 0 && !icon->appearance.eye);
+    }
+    assert(!defaults.patched({{"icon", std::string{"unknown"}}}));
+    assert(!defaults.patched({{"icon_opacity", true}}));
+    assert(!defaults.patched({{"icon_opacity", std::int64_t{101}}}));
+    for (const auto alias : {"satin", "telegram", "grid", "404", "cmatrix", "anon", "liquid-glass", "liquidglass"})
+        assert(defaults.patched({{"variant", std::string{alias}}})->appearance.variant == Hyprveil::Appearance::canonicalVariant(alias));
     const auto configured = defaults.patched({{"mode", std::string{"spoiler"}}, {"color", std::string{"#AaBbCc"}},
         {"grain", std::int64_t{100}}, {"eye", false}});
     assert(configured && configured->appearance.color == "#aabbcc" && configured->appearance.grain == 100 &&
@@ -29,6 +39,13 @@ int main() {
     const auto extrema = defaults.patched({{"grain", std::int64_t{0}}, {"speed", std::int64_t{200}},
         {"darkness", std::int64_t{100}}, {"eye_size", std::int64_t{128}}, {"variant", std::string{"telegram"}}});
     assert(extrema && !extrema->appearance.animated());
+    for (const auto name : Hyprveil::Appearance::VARIANTS) {
+        const auto material = defaults.patched({{"variant", std::string{name}}});
+        assert(material && material->appearance.variant == name);
+        assert(material->appearance.animated() == (name != "matte"));
+    }
+    assert(!defaults.patched({{"variant", std::string{"Aurora"}}}));
+    assert(!defaults.patched({{"variant", std::string{"contour extra"}}}));
 
     char runtime[] = "/tmp/hyprveil-native-model-XXXXXX";
     assert(mkdtemp(runtime));

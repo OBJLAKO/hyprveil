@@ -79,9 +79,12 @@ class Stress:
                        "concurrency_evidence": "overlapping client processes, not protocol-session overlap"}
 
     def start(self):
+        launch = [sys.executable, str(getattr(self.args, "lab_entry", PROJECT / "tools/lab.py")),
+                  "run", "--parent-runtime", self.args.parent_runtime, "--parent-display", self.args.parent_display]
+        if getattr(self.args, "standard_plugin_admission", False):
+            launch.append("--standard-plugin-admission")
         self.launcher = subprocess.Popen(
-            [sys.executable, str(getattr(self.args, "lab_entry", PROJECT / "tools/lab.py")), "run", "--parent-runtime", self.args.parent_runtime,
-             "--parent-display", self.args.parent_display], env=base_env(), stdin=subprocess.DEVNULL,
+            launch, env=base_env(), stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         selector = selectors.DefaultSelector()
         selector.register(self.launcher.stdout, selectors.EVENT_READ)
@@ -314,6 +317,11 @@ class Stress:
 
         for index in range(3):
             self.ctl("reload")
+            # Runtime mode changes are deliberately not persistence. An empty
+            # native config reload returns to black; verify it before selecting
+            # omission again for the underlay/geometry stress assertions.
+            self.scene("config-reload-black-" + str(index + 1), expected, reveal=False, native_black=True)
+            self.ctl("hyprveil", "omit")
             self.scene("config-reload-" + str(index + 1), expected)
             self.sample_resources("config-reload-" + str(index + 1))
         for index in range(3):
@@ -327,6 +335,8 @@ class Stress:
         # Only our disposable headless output changes resolution.
         config.write_text(config.read_text() + '\nhl.monitor({output="HV-TEST",mode="1280x800@60",position="0x0",scale=1.25})\n')
         self.ctl("reload")
+        self.record("fractional reload restores native black", json.loads(self.ctl("hyprveil", "status"))["mode"] == "black")
+        self.ctl("hyprveil", "omit")
         time.sleep(0.4)
         scale = self.monitor()["scale"]
         self.record("fractional-scale-applied", scale == 1.25, scale=scale,
@@ -335,6 +345,8 @@ class Stress:
         self.scene("fractional-scale", expected)
         config.write_text(config.read_text() + '\nhl.monitor({output="HV-TEST",mode="1024x768@60",position="0x0",scale=1})\n')
         self.ctl("reload")
+        self.record("scale restoration reload restores native black", json.loads(self.ctl("hyprveil", "status"))["mode"] == "black")
+        self.ctl("hyprveil", "omit")
         expected = self.transform(256, 192, 320, 240)
         self.scene("scale-restored", expected)
         self.sample_resources("after-load-reload-scale-cycles")

@@ -53,11 +53,13 @@ class MockTrial(service.Controller):
                 if len(args) > 2:
                     self.appearance = {"variant": args[2], "color": args[3], "grain": int(args[4]),
                                        "speed": int(args[5]), "darkness": int(args[6]), "eye": args[7] == "1", "eye_size": int(args[8])}
+                    self.appearance.update(icon=args[9] if len(args) == 11 else "eye", icon_opacity=int(args[10]) if len(args) == 11 else 75)
             elif args[1] != "status":
                 self.mode = args[1]
             if self.invalid_native:
                 return '{"error":"synthetic native refusal"}'
-            return json.dumps({"session": "live", "mode": self.mode, "local_dump": "disabled-in-live", "appearance": self.appearance})
+            return json.dumps({"session": "live", "mode": self.mode, "local_dump": "disabled-in-live", "appearance": self.appearance,
+                               "icon": self.appearance["icon"], "icon_opacity": self.appearance["icon_opacity"]})
         raise AssertionError(args)
 
 
@@ -160,7 +162,7 @@ class SessionTests(unittest.TestCase):
         self.assertNotEqual(first["plugin"], second["plugin"])
         self.assertTrue(Path(first["plugin"]).exists())
 
-    def test_failed_state_write_removes_only_new_owned_marker(self):
+    def test_failed_state_write_cancels_only_new_owned_marker(self):
         original = session.atomic
 
         def refuse_state(path, data, mode):
@@ -170,7 +172,7 @@ class SessionTests(unittest.TestCase):
 
         with patch.object(session, "atomic", side_effect=refuse_state), self.assertRaisesRegex(OSError, "state write failure"):
             session.prepare(self.args)
-        self.assertFalse(Path(self.state["marker"]).exists())
+        self.assertEqual(Path(self.state["marker"]).read_text().splitlines()[3:], ["cancelled", "0"])
 
     def test_foreign_mapping_refuses_every_mode_and_unload(self):
         self.desktop.loaded = True
@@ -188,7 +190,7 @@ class SessionTests(unittest.TestCase):
         self.assertFalse(result["loaded"])
         self.assertEqual(result["mode"], "native")
         self.assertLess(self.desktop.commands.index(("hyprveil", "black")), self.desktop.commands.index(("plugin", "unload", str(self.binary))))
-        self.assertFalse(marker.exists())
+        self.assertEqual(marker.read_text().splitlines()[3:], ["cancelled", "0"])
         self.assertFalse(session.execute(self.state, "unload")["loaded"])
 
     def test_unload_never_removes_unknown_marker_or_arbitrary_state_path(self):
@@ -234,11 +236,11 @@ class SessionTests(unittest.TestCase):
         self.assertFalse(any(args[0] == "eval" for args in self.desktop.commands))
 
     def test_trial_load_applies_saved_appearance_without_changing_black_mode(self):
-        wanted = dict(service.DEFAULT_APPEARANCE, variant="telegram", color="#123456", eye=False, speed=0)
+        wanted = dict(service.DEFAULT_APPEARANCE, variant="signal", color="#123456", eye=False, speed=0)
         result = session.execute(dict(self.state, appearance=wanted), "load")
         self.assertEqual(result["appearance"], wanted)
         self.assertEqual(result["mode"], "black")
-        self.assertIn(("hyprveil", "appearance", "telegram", "#123456", "50", "0", "50", "0", "80"), self.desktop.commands)
+        self.assertIn(("hyprveil", "appearance", "signal", "#123456", "50", "0", "50", "0", "80", "eye", "75"), self.desktop.commands)
 
     def test_trial_partial_configure_rereads_latest_settings_and_preserves_mode(self):
         self.save()
@@ -269,7 +271,7 @@ class SessionTests(unittest.TestCase):
             session.execute(self.state, "configure", appearance={"grain": 0})
         self.assertEqual(self.desktop.commands, [])
 
-    def test_async_load_timeout_removes_marker_to_cancel_delayed_admission(self):
+    def test_async_load_timeout_keeps_cancelled_tombstone_for_delayed_admission(self):
         marker = self.marker()
         original = self.desktop.raw
 
@@ -280,7 +282,7 @@ class SessionTests(unittest.TestCase):
 
         with patch.object(self.desktop, "raw", side_effect=timeout), self.assertRaisesRegex(service.Refused, "timed out"):
             session.execute(self.state, "load")
-        self.assertFalse(marker.exists())
+        self.assertEqual(marker.read_text().splitlines()[3:], ["cancelled", "0"])
         self.assertFalse(self.desktop.loaded)
 
     def test_upgrade_refuses_load_without_preventing_existing_module_unload(self):

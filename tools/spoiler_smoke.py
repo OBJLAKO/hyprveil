@@ -423,8 +423,17 @@ class SpoilerSmoke(Stress):
             self.frame_check(f"continuous frame {index}: opaque spoiler preserves privacy", frames[-1], before,
                              roi, "spoiler", underlay)
         differences = [differing_fraction(first, roi, second, roi, 2) for first, second in zip(frames, frames[1:])]
-        self.assert_check("idle damage-driven spoiler frames visibly animate", min(differences) > 0.01,
-                          successive_private_roi_differences=differences)
+        exact_differences = [differing_fraction(first, roi, second, roi, 0) for first, second in zip(frames, frames[1:])]
+        cumulative_differences = [differing_fraction(frames[0], roi, image, roi, 2) for image in frames[1:]]
+        # Low-frequency geometry can change by less than three RGB levels in
+        # one short frame interval. Require fresh content on every frame and
+        # perceptible movement over the whole burst, independent of its phase.
+        self.assert_check("idle damage-driven spoiler frames visibly animate",
+                          min(exact_differences) > 0 and cumulative_differences[-1] > 0.05,
+                          successive_private_roi_differences=differences,
+                          successive_exact_private_roi_differences=exact_differences,
+                          cumulative_private_roi_differences=cumulative_differences,
+                          observation_span_seconds=(observed[-1]["timestamp_ns"] - observed[0]["timestamp_ns"]) / 1e9)
 
     def direct_and_region_capture(self, before):
         parent = self.protected()
@@ -478,12 +487,19 @@ class SpoilerSmoke(Stress):
                           not black["spoiler_animation_armed"], before=rearmed, after=black)
         self.ctl("hyprveil", "spoiler")
 
+    @staticmethod
+    def observed_appearance(status):
+        return validate_appearance(dict(status["appearance"],
+            icon=status.get("icon", DEFAULT_APPEARANCE["icon"]),
+            icon_opacity=status.get("icon_opacity", DEFAULT_APPEARANCE["icon_opacity"])), canonical=True)
+
     def configure(self, value):
         wanted = validate_appearance(value)
         previous = json.loads(self.ctl("hyprveil", "status"))["mode"]
         status = json.loads(self.ctl("hyprveil", "appearance", wanted["variant"], wanted["color"], str(wanted["grain"]),
-                        str(wanted["speed"]), str(wanted["darkness"]), "1" if wanted["eye"] else "0", str(wanted["eye_size"])))
-        if status.get("mode") != previous or validate_appearance(status.get("appearance"), canonical=True) != wanted:
+                        str(wanted["speed"]), str(wanted["darkness"]), "1" if wanted["eye"] else "0", str(wanted["eye_size"]),
+                        wanted["icon"], str(wanted["icon_opacity"])))
+        if status.get("mode") != previous or self.observed_appearance(status) != wanted:
             raise RuntimeError("native appearance acknowledgement mismatched or changed mode")
         return status
 
@@ -500,9 +516,9 @@ class SpoilerSmoke(Stress):
         # suite explicitly selects spoiler before comparing visual parameters.
         self.ctl("hyprveil", "spoiler")
         current = json.loads(self.ctl("hyprveil", "appearance"))
-        self.assert_check("native appearance query exposes canonical defaults", current.get("appearance") == DEFAULT_APPEARANCE)
+        self.assert_check("native appearance query exposes canonical defaults", self.observed_appearance(current) == DEFAULT_APPEARANCE)
         presets = {}
-        for variant in ("satin", "telegram"):
+        for variant in ("prism", "signal"):
             self.configure(dict(DEFAULT_APPEARANCE, variant=variant))
             first = self.capture_image(variant + "-animated-first")
             self.frame_check(variant + " preset masks original private pixels", first, before, roi, "spoiler", underlay)
@@ -527,53 +543,53 @@ class SpoilerSmoke(Stress):
             difference = differing_fraction(grain_zero, roi, grain_full, roi, 2)
             self.assert_check(variant + " grain endpoints visibly affect only the private replacement",
                               difference > 0.10, changed_fraction=difference)
-        difference = differing_fraction(presets["satin"], roi, presets["telegram"], roi, 2)
-        self.assert_check("satin and telegram presets have distinguishable frozen appearances", difference > 0.50,
+        difference = differing_fraction(presets["prism"], roi, presets["signal"], roi, 2)
+        self.assert_check("prism and signal presets have distinguishable frozen appearances", difference > 0.50,
                           changed_fraction=difference)
 
-        vivid = dict(DEFAULT_APPEARANCE, variant="telegram", color="#3b82f6", grain=100, speed=200, darkness=0, eye=False)
+        vivid = dict(DEFAULT_APPEARANCE, variant="matte", color="#3b82f6", grain=100, speed=200, darkness=0, eye=False)
         self.configure(vivid)
-        tinted = self.appearance_frame("telegram-blue-bright-fast", before, roi)
+        tinted = self.appearance_frame("signal-blue-bright-fast", before, roi)
         means = [sum(pixel[channel] for pixel in tinted.pixels(roi)) / (roi[2] * roi[3]) for channel in range(3)]
         self.assert_check("hex tint changes the opaque replacement hue", means[2] > means[1] > means[0], mean_rgb=means)
         self.configure(dict(vivid, darkness=100))
-        dark = self.appearance_frame("telegram-darkness-full", before, roi)
+        dark = self.appearance_frame("signal-darkness-full", before, roi)
         status = json.loads(self.ctl("hyprveil", "status"))
         self.assert_check("darkness 100 with eye disabled gives solid opaque black and no animation",
                           color_fraction(dark, roi, (0, 0, 0), 0) == 1 and not status["spoiler_animation_armed"])
         self.configure(dict(vivid, color="#000000"))
-        zero_tint = self.appearance_frame("telegram-black-tint", before, roi)
+        zero_tint = self.appearance_frame("signal-black-tint", before, roi)
         status = json.loads(self.ctl("hyprveil", "status"))
         self.assert_check("black tint gives solid opaque black and no animation",
                           color_fraction(zero_tint, roi, (0, 0, 0), 0) == 1 and not status["spoiler_animation_armed"])
 
         self.configure(dict(DEFAULT_APPEARANCE, speed=0, eye=False))
-        eye_off = self.appearance_frame("crossed-eye-disabled", before, roi)
+        eye_off = self.appearance_frame("privacy-eye-disabled", before, roi)
         eye_counts = {}
         for size in (40, 128):
             self.configure(dict(DEFAULT_APPEARANCE, speed=0, eye=True, eye_size=size))
-            image = self.appearance_frame(f"crossed-eye-{size}", before, roi)
+            image = self.appearance_frame(f"privacy-eye-{size}", before, roi)
             eye_counts[size] = round(differing_fraction(eye_off, roi, image, roi, 2) * roi[2] * roi[3])
         self.assert_check("eye toggle and both size endpoints change centered icon pixels",
                           eye_counts[40] > 50 and eye_counts[128] > eye_counts[40] * 2, changed_pixels=eye_counts)
 
-        self.configure(dict(DEFAULT_APPEARANCE, variant="telegram", speed=0, eye=False))
-        full = self.capture_image("telegram-frozen-full-coordinate-reference")
+        self.configure(dict(DEFAULT_APPEARANCE, variant="signal", speed=0, eye=False))
+        full = self.capture_image("signal-frozen-full-coordinate-reference")
         parent = self.protected()
         px, py = parent["at"]
         pw, ph = parent["size"]
-        cropped_path = self.artifacts / "telegram-frozen-cropped.png"
+        cropped_path = self.artifacts / "signal-frozen-cropped.png"
         self.command(["grim", "-g", f"{px-16},{py-16} {pw+32}x{ph+32}", str(cropped_path)])
         cropped = Image(cropped_path)
         crop_roi = (32, 32, pw - 32, ph - 32)
         difference = differing_fraction(full, roi, cropped, crop_roi, 0)
-        self.assert_check("frozen telegram crop has exact full-frame physical grain coordinates",
+        self.assert_check("frozen signal crop has exact full-frame physical grain coordinates",
                           difference == 0 and absence_report(cropped, PRIVATE, 8)["ok"] and
                           opacity_fraction(cropped, (0, 0, cropped.width, cropped.height)) == 1 and
                           self.geometry() == before and self.privacy(), changed_fraction=difference)
 
         baseline = json.loads(self.ctl("hyprveil", "status"))
-        fields = ["telegram", "#ffffff", "50", "100", "50", "1", "80"]
+        fields = ["signal", "#ffffff", "50", "100", "50", "1", "80"]
         invalid_fields = []
         for index, values in ((0, ("blur",)), (1, ("#fff", "#ffffff00", "#fffffz")),
                               (2, ("NaN", "true", "101", "-1", "1.0")), (3, ("201",)),
@@ -594,7 +610,7 @@ class SpoilerSmoke(Stress):
                           self.geometry() == before and self.privacy(), rejected_inputs=len(rejections))
         local = self.local_image("customization-local")
         self.assert_check("all customization changes leave original local pixels visible", color_fraction(local, roi, PRIVATE, 3) >= 0.99)
-        self.configure(dict(DEFAULT_APPEARANCE, variant="telegram"))
+        self.configure(dict(DEFAULT_APPEARANCE, variant="signal"))
         self.fractional_scale(before)
         self.configure(DEFAULT_APPEARANCE)
 
@@ -667,21 +683,21 @@ class SpoilerSmoke(Stress):
         self.assert_check("large synthetic spoiler preview visibly animates", difference > 0.01,
                           private_roi_difference=difference)
         self.report["design_preview"] = str(self.artifacts / "preview-1920-spoiler.png")
-        self.report["design_previews"] = {"satin": self.report["design_preview"]}
+        self.report["design_previews"] = {"prism": self.report["design_preview"]}
         if self.args.customization:
-            self.configure(dict(DEFAULT_APPEARANCE, variant="telegram"))
-            telegram = self.capture_image("preview-1920-telegram")
+            self.configure(dict(DEFAULT_APPEARANCE, variant="signal"))
+            signal = self.capture_image("preview-1920-signal")
             time.sleep(0.15)
-            repeat = self.capture_image("preview-1920-telegram-second")
-            for index, image in enumerate((telegram, repeat)):
-                self.assert_check(f"full-size telegram preview frame {index} is opaque and private",
+            repeat = self.capture_image("preview-1920-signal-second")
+            for index, image in enumerate((signal, repeat)):
+                self.assert_check(f"full-size signal preview frame {index} is opaque and private",
                                   absence_report(image, PRIVATE, 8)["ok"] and
                                   opacity_fraction(image, (0, 0, image.width, image.height)) == 1 and
                                   color_fraction(image, rect, (0, 0, 0), 3) < 0.99 and
                                   self.geometry() == geometry and self.privacy())
-            self.assert_check("full-size telegram preview animates without exposing content",
-                              differing_fraction(telegram, rect, repeat, rect, 2) > 0.01)
-            self.report["design_previews"]["telegram"] = str(self.artifacts / "preview-1920-telegram.png")
+            self.assert_check("full-size signal preview animates without exposing content",
+                              differing_fraction(signal, rect, repeat, rect, 2) > 0.01)
+            self.report["design_previews"]["signal"] = str(self.artifacts / "preview-1920-signal.png")
             self.configure(DEFAULT_APPEARANCE)
         self.dispatch('hl.dsp.window.fullscreen({window=' + json.dumps(self.address()) +
                       ',action="unset",mode="fullscreen",layout_aware=false})')

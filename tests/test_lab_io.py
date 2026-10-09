@@ -6,10 +6,37 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("lab_io", Path(__file__).resolve().parents[1] / "tools/lab.py")
 lab = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(lab)
+
+
+class LabAdmissionEnvironmentTests(unittest.TestCase):
+    def test_standard_admission_omits_only_plugin_lab_marker(self):
+        runtime = Path("/tmp/hv-synthetic-environment")
+        inherited = {"PATH": "/usr/bin", "LANG": "C.UTF-8", "DISPLAY": ":0",
+                     "WAYLAND_DISPLAY": "host-display", "HYPRLAND_INSTANCE_SIGNATURE": "host-instance",
+                     "DBUS_SESSION_BUS_ADDRESS": "host-bus", "HOME": "/host/home", "SECRET": "keep-out"}
+        with patch.dict(lab.os.environ, inherited, clear=True):
+            diagnostic = lab.compositor_env(runtime)
+            standard = lab.compositor_env(runtime, standard_plugin_admission=True)
+        self.assertEqual(diagnostic, dict(standard, HYPRVEIL_LAB_RUNTIME=str(runtime)))
+        self.assertEqual(standard["LIBSEAT_BACKEND"], "hyprveil-disabled")
+        self.assertEqual(standard["XDG_RUNTIME_DIR"], str(runtime))
+        self.assertEqual(standard["HOME"], str(runtime / "home"))
+        for key in ("DISPLAY", "WAYLAND_DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "DBUS_SESSION_BUS_ADDRESS", "SECRET"):
+            self.assertNotIn(key, standard)
+
+    def test_fixture_environment_retains_explicit_lab_identity(self):
+        runtime = Path("/tmp/hv-synthetic-environment")
+        data = {"wayland_display": "wayland-synthetic", "signature": "synthetic-instance",
+                "standard_plugin_admission": True}
+        fixtures = lab.lab_env(runtime, data)
+        self.assertEqual(fixtures["HYPRVEIL_LAB_RUNTIME"], str(runtime))
+        self.assertEqual(fixtures["WAYLAND_DISPLAY"], data["wayland_display"])
+        self.assertEqual(fixtures["HYPRLAND_INSTANCE_SIGNATURE"], data["signature"])
 
 
 class LabPublicationTests(unittest.TestCase):

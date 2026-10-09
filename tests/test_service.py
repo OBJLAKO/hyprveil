@@ -75,11 +75,13 @@ class FakeController(service.Controller):
                 if len(args) > 2:
                     self.appearance = {"variant": args[2], "color": args[3], "grain": int(args[4]),
                                        "speed": int(args[5]), "darkness": int(args[6]), "eye": args[7] == "1", "eye_size": int(args[8])}
+                    self.appearance.update(icon=args[9] if len(args) == 11 else "eye", icon_opacity=int(args[10]) if len(args) == 11 else 75)
             elif args[1] != "status":
                 self.mode = args[1]
             status = {"session": "live", "mode": self.mode, "local_dump": "disabled-in-live", "image_status": "pending"}
             if not self.legacy:
                 status["appearance"] = self.appearance_reply if self.appearance_reply is not None else self.appearance
+                status.update(icon=self.appearance["icon"], icon_opacity=self.appearance["icon_opacity"])
             return json.dumps(status)
         raise AssertionError(args)
 
@@ -179,7 +181,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(parsed["appearance"], service.DEFAULT_APPEARANCE)
         parsed["appearance"]["grain"] = 0
         self.assertEqual(service.DEFAULT_APPEARANCE["grain"], 50)
-        customized = dict(service.DEFAULT_APPEARANCE, color="#AABBCC", variant="telegram")
+        customized = dict(service.DEFAULT_APPEARANCE, color="#AABBCC", variant="signal")
         self.assertEqual(service.manifest(dict(self.settings, appearance=customized))["appearance"]["color"], "#aabbcc")
 
     def test_appearance_schema_rejects_unknown_missing_and_non_integer_values(self):
@@ -193,13 +195,74 @@ class ServiceTests(unittest.TestCase):
             with self.subTest(appearance=appearance), self.assertRaises(service.Refused):
                 service.manifest(dict(self.settings, appearance=appearance))
 
+    def test_ten_material_variants_are_admitted_and_persist_without_mode_change(self):
+        self.assertEqual(service.APPEARANCE_VARIANTS, ("prism", "signal", "aurora", "contour", "radar", "matte", "error404", "matrix", "anonymous", "glass"))
+        for variant in service.APPEARANCE_VARIANTS:
+            with self.subTest(variant=variant):
+                controller = FakeController(self.config)
+                controller.loaded = True
+                controller.mode = "spoiler"
+                result = controller.run("configure", appearance={"variant": variant})
+                self.assertEqual(result["appearance"]["variant"], variant)
+                self.assertEqual(result["mode"], "spoiler")
+                self.assertEqual(json.loads(service.read_private(self.config))["appearance"]["variant"], variant)
+
+    def test_legacy_variants_and_seven_field_manifests_are_normalized(self):
+        for alias, canonical in service.APPEARANCE_ALIASES.items():
+            legacy = {key: value for key, value in dict(service.DEFAULT_APPEARANCE, variant=alias, eye=False).items() if key not in service.ICON_FIELDS}
+            result = service.manifest(dict(self.settings, appearance=legacy))["appearance"]
+            self.assertEqual(result["variant"], canonical)
+            self.assertFalse(result["eye"])
+            self.assertEqual((result["icon"], result["icon_opacity"]), ("eye", 75))
+
+    def test_native_seven_field_status_is_enriched_from_top_level_icons(self):
+        controller = FakeController(self.config)
+        old = {key: value for key, value in service.DEFAULT_APPEARANCE.items() if key not in service.ICON_FIELDS}
+        value = dict(session="live", mode="spoiler", local_dump="disabled-in-live", config_api=1,
+                     image_path="", appearance=old, icon="shield", icon_opacity=23)
+        status = controller.live_status(value)
+        self.assertEqual(status["appearance"], dict(service.DEFAULT_APPEARANCE, icon="shield", icon_opacity=23))
+        self.assertEqual(service.native_values(status)["icon"], "shield")
+        for invalid in (dict(value, icon=[]), {key: item for key, item in value.items() if key != "icon_opacity"}):
+            with self.assertRaises(service.Refused):
+                controller.live_status(invalid)
+
+    def test_real_native_cas_normalizes_alias_and_uppercase_color_preserving_icons(self):
+        controller = FakeController(self.config)
+        controller.loaded = True
+        controller.appearance.update(icon="lock", icon_opacity=28)
+        current = controller.native("status")
+        original = controller.raw
+        emitted = []
+
+        def commit(*args):
+            if args[0] == "eval":
+                emitted.append(args[1])
+                controller.appearance.update(color="#aabbcc", variant="signal")
+                return "ok"
+            return original(*args)
+
+        with patch.object(controller, "raw", side_effect=commit):
+            result = service.Controller.native_configure(controller, {"color": "#AABBCC", "variant": "telegram"}, current)
+        self.assertEqual(result["appearance"], dict(service.DEFAULT_APPEARANCE, color="#aabbcc", variant="signal", icon="lock", icon_opacity=28))
+        self.assertIn('s.icon == "lock"', emitted[0])
+        self.assertIn('s.icon_opacity == 28', emitted[0])
+        self.assertIn('color="#aabbcc"', emitted[0])
+        self.assertNotIn("s.appearance.icon", emitted[0])
+
+    def test_variant_and_icon_invalid_types_raise_typed_refusal(self):
+        for field in ("variant", "icon"):
+            for value in (None, [], {}, 7, True):
+                with self.subTest(field=field, value=value), self.assertRaises(service.Refused):
+                    service.validate_appearance(dict(service.DEFAULT_APPEARANCE, **{field: value}))
+
     def test_cli_configure_passes_a_typed_partial_patch(self):
         with patch.object(service, "Controller") as constructor, contextlib.redirect_stdout(io.StringIO()):
             constructor.return_value.run.return_value = {"mode": "spoiler"}
-            self.assertEqual(service.main(["configure", "--variant", "telegram", "--color", "#AABBCC",
+            self.assertEqual(service.main(["configure", "--variant", "signal", "--color", "#AABBCC",
                                            "--grain", "0", "--speed", "200", "--eye", "off", "--eye-size", "128"]), 0)
             constructor.return_value.run.assert_called_once_with("configure", None, False,
-                {"variant": "telegram", "color": "#AABBCC", "grain": 0, "speed": 200, "eye": False, "eye_size": 128})
+                {"variant": "signal", "color": "#AABBCC", "grain": 0, "speed": 200, "eye": False, "eye_size": 128})
 
     def test_cli_rejects_non_decimal_and_out_of_range_numbers_before_controller(self):
         for value in ("NaN", "1.0", "true", "-1", "+1", "001", "101", "1;touch /tmp/no"):
@@ -223,15 +286,15 @@ class ServiceTests(unittest.TestCase):
         controller = FakeController(self.config)
         controller.loaded = True
         controller.mode = "spoiler"
-        result = controller.run("configure", appearance={"variant": "telegram", "color": "#AABBCC", "speed": 0, "eye": False})
-        wanted = dict(service.DEFAULT_APPEARANCE, variant="telegram", color="#aabbcc", speed=0, eye=False)
+        result = controller.run("configure", appearance={"variant": "signal", "color": "#AABBCC", "speed": 0, "eye": False})
+        wanted = dict(service.DEFAULT_APPEARANCE, variant="signal", color="#aabbcc", speed=0, eye=False)
         self.assertEqual(result["appearance"], wanted)
         self.assertEqual(result["mode"], "spoiler")
         saved = json.loads(service.read_private(self.config))
         self.assertEqual(saved["appearance"], wanted)
         self.assertEqual(saved["desired_mode"], "omit")
         self.assertEqual(saved["image_path"], "")
-        self.assertIn(("hyprveil", "appearance", "telegram", "#aabbcc", "50", "0", "50", "0", "80"), controller.commands)
+        self.assertIn(("hyprveil", "appearance", "signal", "#aabbcc", "50", "0", "50", "0", "80", "eye", "75"), controller.commands)
         self.assertFalse(any(args[0] == "eval" or args[:2] == ("plugin", "load") or args[:2] in (("hyprveil", "black"), ("hyprveil", "spoiler"))
                              for args in controller.commands))
 
@@ -248,13 +311,13 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(second.appearance, wanted)
 
     def test_saved_appearance_restores_while_black_before_saved_spoiler(self):
-        appearance = dict(service.DEFAULT_APPEARANCE, variant="telegram", color="#123456", grain=99,
+        appearance = dict(service.DEFAULT_APPEARANCE, variant="signal", color="#123456", grain=99,
                           speed=0, darkness=100, eye=False, eye_size=128)
         self.settings.update(appearance=appearance, desired_mode="spoiler")
         self.write_settings()
         controller = FakeController(self.config)
         result = controller.run("start")
-        command = ("hyprveil", "appearance", "telegram", "#123456", "99", "0", "100", "0", "128")
+        command = ("hyprveil", "appearance", "signal", "#123456", "99", "0", "100", "0", "128", "eye", "75")
         self.assertEqual(result["appearance"], appearance)
         self.assertEqual(result["mode"], "spoiler")
         self.assertLess(controller.commands.index(("hyprveil", "status")), controller.commands.index(command))
@@ -363,7 +426,7 @@ class ServiceTests(unittest.TestCase):
         omit = controller.commands.index(("hyprveil", "omit"))
         self.assertLess(load, validate)
         self.assertLess(validate, omit)
-        self.assertFalse((self.runtime / ".hyprveil-live-111").exists())
+        self.assertEqual((self.runtime / ".hyprveil-live-111").read_text().splitlines()[3:], ["cancelled", "0"])
         self.assertEqual(json.loads(service.read_private(controller.state_path))["status"]["mode"], "omit")
 
     def test_new_plugin_must_start_black(self):
@@ -416,7 +479,7 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(controller.loaded)
         self.assertEqual(controller.mode, "black")
         self.assertNotIn(("hyprveil", "omit"), controller.commands)
-        self.assertFalse((self.runtime / ".hyprveil-live-111").exists())
+        self.assertEqual((self.runtime / ".hyprveil-live-111").read_text().splitlines()[3:], ["cancelled", "0"])
 
     def test_unknown_marker_is_not_removed(self):
         marker = self.runtime / ".hyprveil-live-111"
@@ -427,12 +490,68 @@ class ServiceTests(unittest.TestCase):
             FakeController(self.config).run("start")
         self.assertEqual(marker.read_text(), content)
 
+    def test_no_marker_cancellation_does_not_block_normal_hyprpm_admission(self):
+        controller = FakeController(self.config)
+        controller.connect()
+        controller.remove_marker()
+        self.assertFalse(controller.marker_path().exists())
+
+    def test_cancelled_trial_is_idempotent_and_explicitly_rearmed(self):
+        controller = FakeController(self.config)
+        controller.connect()
+        with patch.object(service.time, "time", return_value=1000):
+            self.assertEqual(controller.create_marker(), 1120)
+        controller.remove_marker()
+        cancelled = service.read_private(controller.marker_path())
+        self.assertEqual(cancelled.decode().splitlines()[3:], ["cancelled", "0"])
+        controller.remove_marker()
+        self.assertEqual(service.read_private(controller.marker_path()), cancelled)
+        with patch.object(service.time, "time", return_value=2000):
+            self.assertEqual(controller.create_marker(lifetime=7200), 9200)
+        self.assertEqual(service.read_private(controller.marker_path()).decode().splitlines()[3:], ["black", "9200"])
+
+    def test_marker_updates_never_follow_links_or_overwrite_unknown_contents(self):
+        controller = FakeController(self.config)
+        controller.connect()
+        target = self.root / "do-not-change-marker"
+        original = b"hyprveil-live-v1\n111\nsynthetic-instance\nblack\n1\n"
+        target.write_bytes(original)
+        target.chmod(0o600)
+        marker = controller.marker_path()
+        marker.symlink_to(target)
+        for action in (controller.remove_marker, controller.create_marker):
+            with self.assertRaises((OSError, service.Refused)):
+                action()
+            self.assertEqual(target.read_bytes(), original)
+        marker.unlink()
+        marker.write_text("hyprveil-live-v1\n111\nsynthetic-instance\ncancelled\n123\n")
+        marker.chmod(0o600)
+        unknown = marker.read_bytes()
+        for action in (controller.remove_marker, controller.create_marker):
+            with self.assertRaises(service.Refused):
+                action()
+            self.assertEqual(marker.read_bytes(), unknown)
+
+    def test_malformed_marker_line_endings_and_encoding_are_preserved(self):
+        controller = FakeController(self.config)
+        controller.connect()
+        marker = controller.marker_path()
+        for content in (b"hyprveil-live-v1\r\n111\r\nsynthetic-instance\r\nblack\r\n1\r\n",
+                        b"hyprveil-live-v1\n111\nsynthetic-instance\nblack\v1\n",
+                        b"hyprveil-live-v1\n111\nsynthetic-instance\nblack\n\xff\n"):
+            marker.write_bytes(content)
+            marker.chmod(0o600)
+            for action in (controller.create_marker, controller.remove_marker):
+                with self.assertRaises(service.Refused):
+                    action()
+                self.assertEqual(marker.read_bytes(), content)
+
     def test_matching_expired_marker_can_be_replaced(self):
         marker = self.runtime / ".hyprveil-live-111"
         marker.write_text("hyprveil-live-v1\n111\nsynthetic-instance\nblack\n1\n")
         marker.chmod(0o600)
         self.assertEqual(FakeController(self.config).run("start")["mode"], "omit")
-        self.assertFalse(marker.exists())
+        self.assertEqual(marker.read_text().splitlines()[3:], ["cancelled", "0"])
 
     def test_foreign_mapped_plugin_refuses_mode_and_unload(self):
         for action in ("omit", "stop"):
@@ -655,7 +774,7 @@ class ServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(service.Refused, "died"):
                 controller.run("start")
         self.assertEqual(json.loads(service.read_private(controller.startup_path))["phase"], "pending")
-        self.assertFalse((self.runtime / ".hyprveil-live-111").exists())
+        self.assertEqual((self.runtime / ".hyprveil-live-111").read_text().splitlines()[3:], ["cancelled", "0"])
         next_login = FakeController(self.config)
         with self.assertRaisesRegex(service.Refused, "not confirmed"):
             next_login.run("start")
@@ -679,10 +798,10 @@ class ServiceTests(unittest.TestCase):
         controller = service.Controller(self.config, "synthetic-instance")
         controller.connection_deadline = 12
         response = SimpleNamespace(returncode=0, stdout="[]", stderr="")
-        with patch.object(service.time, "monotonic", return_value=10.5), patch.object(service.subprocess, "run", return_value=response) as run:
+        with patch.object(service.time, "monotonic", return_value=10.5), patch.object(service, "bounded_command", return_value=response) as run:
             self.assertEqual(controller.raw("-j", "instances"), "[]")
             self.assertEqual(run.call_args.kwargs["timeout"], 1.5)
-        with patch.object(service.time, "monotonic", return_value=13), patch.object(service.subprocess, "run") as run:
+        with patch.object(service.time, "monotonic", return_value=13), patch.object(service, "bounded_command") as run:
             with self.assertRaises(service.NotReady):
                 controller.raw("-j", "instances")
             run.assert_not_called()

@@ -121,7 +121,7 @@ class InstallTests(unittest.TestCase):
 
     def test_upgrade_preserves_all_appearance_settings_and_mode(self):
         first, _ = self.run_install()
-        wanted = dict(service.DEFAULT_APPEARANCE, variant="telegram", color="#1a2b3c", grain=0,
+        wanted = dict(service.DEFAULT_APPEARANCE, variant="signal", color="#1a2b3c", grain=0,
                       speed=200, darkness=100, eye=False, eye_size=128)
         settings = json.loads(service.read_private(first.config))
         settings.update(appearance=wanted, desired_mode="spoiler", enabled=False)

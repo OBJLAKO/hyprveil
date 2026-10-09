@@ -369,12 +369,20 @@ print("[SELECTION]/screen:HV-TEST")
         mask.unlink()
         previous = evaluate("snapshot()")
         ctl("reload")
-        frame("gold", 1, after_serial=previous["frameSerial"])
+        # Registered native settings follow the configuration file on reload.
+        # This lab file contains no appearance/mode override, so its safe black
+        # defaults supersede the preceding runtime-only image selection.
+        reloaded = json.loads(ctl("hyprveil", "status"))
+        if reloaded.get("mode") != "black" or reloaded.get("image_path") != "":
+            raise RuntimeError("native configuration reload did not restore safe lab defaults")
+        frame("black", 1, after_serial=previous["frameSerial"])
         missing = json.loads(ctl("hyprveil", "image", str(mask)))
         if not missing.get("error"):
             raise RuntimeError("missing mask file was not rejected")
-        frame("gold", 2)
-        controls.append({"name": "deleted cached texture survives config reload; missing-path command rejected", "ok": True})
+        frame("black", 4)
+        controls.append({"name": "native config reload restores black defaults; missing-path command rejected",
+                         "ok": True, "native_mode": reloaded["mode"], "native_image_path": reloaded["image_path"],
+                         "before_serial": previous["frameSerial"]})
         # These valid PNG headers declare hostile allocation sizes. No large
         # decoded surface is constructed by the fixture or the test oracle.
         for index, (width, height) in enumerate(((8193, 1), (8192, 4096), (0, 240))):

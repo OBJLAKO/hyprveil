@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <span>
 #include <vector>
+#include <cairo/cairo.h>
 #include <zlib.h>
 
 namespace Hyprveil::Png {
@@ -13,6 +14,36 @@ constexpr std::uint64_t MAX_PIXELS = 16U * 1024U * 1024U;
 constexpr std::uint32_t MAX_AXIS = 8192;
 constexpr std::uint64_t MAX_DECODED_BYTES = 64U * 1024U * 1024U;
 constexpr std::size_t MAX_CHUNKS = 16384;
+
+// The reviewed Hyprland Cairo uploader treats every format except RGB96F as
+// four unsigned bytes per pixel. Cairo 1.18 can decode RGBA16 PNGs as RGBA128F,
+// so passing decoded surfaces through directly corrupts their pixels/alpha.
+// Return an owned ARGB32 reference (or conversion) with Cairo's premultiplied
+// alpha; callers destroy it independently from the decoded source surface.
+inline cairo_surface_t* uploadPixels(cairo_surface_t* image) {
+    if (!image || cairo_surface_status(image) != CAIRO_STATUS_SUCCESS ||
+        cairo_surface_get_type(image) != CAIRO_SURFACE_TYPE_IMAGE)
+        return nullptr;
+    const auto width = cairo_image_surface_get_width(image), height = cairo_image_surface_get_height(image);
+    if (width <= 0 || height <= 0 || width > static_cast<int>(MAX_AXIS) || height > static_cast<int>(MAX_AXIS) ||
+        std::uint64_t{static_cast<unsigned>(width)} * static_cast<unsigned>(height) > MAX_PIXELS)
+        return nullptr;
+    if (cairo_image_surface_get_format(image) == CAIRO_FORMAT_ARGB32)
+        return cairo_surface_reference(image);
+    auto* output = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+    auto* paint = cairo_create(output);
+    cairo_set_operator(paint, CAIRO_OPERATOR_SOURCE);
+    cairo_set_source_surface(paint, image, 0, 0);
+    cairo_paint(paint);
+    const auto status = cairo_status(paint);
+    cairo_destroy(paint);
+    if (status != CAIRO_STATUS_SUCCESS || cairo_surface_status(output) != CAIRO_STATUS_SUCCESS) {
+        cairo_surface_destroy(output);
+        return nullptr;
+    }
+    cairo_surface_flush(output);
+    return output;
+}
 
 // Cairo/libpng can inflate ancillary text/ICC data independently from image
 // dimensions. Decode only essential pixel chunks and bounded palette/alpha.

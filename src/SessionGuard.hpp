@@ -7,10 +7,24 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace Hyprveil {
+// Hooks depend on exact native layouts and even the reviewed caller's
+// ownership conventions. Matching two hashes only proves a local rebuild;
+// it must never admit an otherwise unreviewed compositor/dependency ABI.
+inline constexpr std::string_view REVIEWED_ABI =
+    "efb50993780079460b0cbed1363e2166a2de1d9f_aq_0.15_hu_0.14_hg_0.5_hc_0.1_hlg_0.6";
+
+inline void requireReviewedAbi(std::string_view compositor, std::string_view client) {
+    if (compositor != client)
+        throw std::runtime_error("hyprveil: exact Hyprland ABI mismatch; rebuild for this compositor");
+    if (compositor != REVIEWED_ABI)
+        throw std::runtime_error("hyprveil: unreviewed Hyprland ABI; this release only supports the reviewed compositor and dependency versions");
+}
+
 namespace Detail {
 class OwnedFd {
   public:
@@ -68,5 +82,22 @@ inline void requireLiveMarker(const std::string& runtime, pid_t pid, const std::
     const auto parsed = std::from_chars(expiry.data(), expiry.data() + expiry.size(), expires);
     if (parsed.ec != std::errc{} || parsed.ptr != expiry.data() + expiry.size() || expires <= now || expires - now > 4 * 60 * 60)
         throw std::runtime_error("hyprveil: live trial marker must expire within the next four hours");
+}
+
+// Ordinary Hyprpm loads need no marker. If a legacy controller has initiated
+// a trial, however, its explicit cancellation/expiry must still deny delayed
+// permission responses. Presence (including a symlink) always selects the
+// strict marker path; only ENOENT permits standard admission.
+inline void requireOptionalLiveMarker(const std::string& runtime, pid_t pid, const std::string& signature, std::uint64_t now) {
+    if (runtime.empty() || runtime.front() != '/' || pid <= 0 || signature.empty())
+        throw std::runtime_error("hyprveil: missing live session identity");
+    const auto path = runtime + "/.hyprveil-live-" + std::to_string(pid);
+    struct stat info {};
+    if (lstat(path.c_str(), &info) == 0) {
+        requireLiveMarker(runtime, pid, signature, now);
+        return;
+    }
+    if (errno != ENOENT)
+        throw std::runtime_error("hyprveil: cannot inspect optional live trial marker");
 }
 } // namespace Hyprveil

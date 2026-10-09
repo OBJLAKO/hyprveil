@@ -48,6 +48,7 @@ class UpgradeSmoke(Stress):
         self.old = self.guard = None
         self.pending = None
         self.watcher = None
+        self.watcher_buffer = b""
         self.report["pixel_matching"] = "whole synthetic capture secret-color absence, RGB tolerance 8"
         self.report["watcher"] = str(args.watcher) if args.watcher is not None else None
 
@@ -141,16 +142,32 @@ class UpgradeSmoke(Stress):
     def focus_window(self, address):
         self.dispatch('hl.dsp.focus({window=' + json.dumps("address:" + address) + '})')
 
-    def stream_state(self, label, expected):
+    def stream_state(self, label, expected, allow_intermediate=False):
         if self.watcher is None:
             return
+        deadline = time.monotonic() + 2.0
+        observed = []
         with selectors.DefaultSelector() as selector:
             selector.register(self.watcher.stdout, selectors.EVENT_READ)
-            ready = selector.select(2.0)
-        self.check(label + ": changed stream arrives within bound", bool(ready))
-        line = self.watcher.stdout.readline()
-        state = json.loads(line)
-        self.check(label + ": persistent helper state", state == expected, state=state)
+            while time.monotonic() < deadline:
+                if b"\n" not in self.watcher_buffer:
+                    if not selector.select(max(0, deadline - time.monotonic())):
+                        break
+                    chunk = os.read(self.watcher.stdout.fileno(), 4096)
+                    if not chunk:
+                        break
+                    self.watcher_buffer += chunk
+                    if len(self.watcher_buffer) > 16384:
+                        raise RuntimeError("oversized synthetic watcher output")
+                    continue
+                line, self.watcher_buffer = self.watcher_buffer.split(b"\n", 1)
+                state = json.loads(line)
+                observed.append(state)
+                if state == expected or not allow_intermediate:
+                    break
+        self.check(label + ": changed stream arrives within bound", bool(observed))
+        self.check(label + ": persistent helper state", bool(observed) and observed[-1] == expected,
+                   state=observed[-1] if observed else None, observed_transitions=observed)
 
     def active_tests(self, orphan):
         background = next(item for item in self.clients() if item["class"] == "org.hyprveil.fixture.background")
@@ -159,7 +176,7 @@ class UpgradeSmoke(Stress):
         self.active_status("public focused fixture", self.privacy_expected("visible", address))
         if self.args.watcher is not None:
             self.watcher = subprocess.Popen(["/usr/bin/python3", str(self.args.watcher), "watch", "--lab-runtime", str(self.runtime)],
-                env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
             self.stream_state("initial public focus", self.privacy_expected("visible", address))
             with selectors.DefaultSelector() as selector:
                 selector.register(self.watcher.stdout, selectors.EVENT_READ)
@@ -180,7 +197,12 @@ class UpgradeSmoke(Stress):
         self.active_status("empty workspace", self.privacy_expected("none"))
         self.dispatch('hl.dsp.focus({workspace="1"})')
         self.focus_window(address)
-        self.stream_state("public focus restored", self.privacy_expected("visible", address))
+        # Restoring a workspace can first restore its formerly focused orphan,
+        # before the following explicit focus selects the public background.
+        # Keep those genuine events and require convergence within the same
+        # bound; do not mistake the intermediate hidden state for stale output.
+        self.stream_state("public focus restored", self.privacy_expected("visible", address), allow_intermediate=True)
+        self.active_status("public focus restored", self.privacy_expected("visible", address))
         if self.watcher is not None:
             self.watcher.terminate()
             self.watcher.communicate(timeout=2)
@@ -269,7 +291,7 @@ class UpgradeSmoke(Stress):
         native = json.loads(self.ctl("hyprveil", "status"))
         self.check("new native file settings apply while capture remains held",
                    not self.ctl("configerrors") and native.get("config_api") == 1 and
-                   native.get("mode") == "spoiler" and native.get("appearance", {}).get("variant") == "telegram" and
+                   native.get("mode") == "spoiler" and native.get("appearance", {}).get("variant") == "signal" and
                    json.loads(self.ctl("hv-upgrade", "status"))["held"], native=native)
         nonblack = json.loads(self.ctl("hv-upgrade", "handoff", str(self.plugin), new_sha))
         held = json.loads(self.ctl("hv-upgrade", "status"))

@@ -21,9 +21,10 @@ int main() {
         stream.close();
         chmod(marker.c_str(), 0600);
     };
-    auto rejects = [&]() {
+    auto rejects = [&](bool optional = false) {
         try {
-            Hyprveil::requireLiveMarker(runtime.string(), getpid(), signature, now);
+            if (optional) Hyprveil::requireOptionalLiveMarker(runtime.string(), getpid(), signature, now);
+            else Hyprveil::requireLiveMarker(runtime.string(), getpid(), signature, now);
         } catch (const std::runtime_error&) {
             ++passed;
             return;
@@ -31,12 +32,35 @@ int main() {
         throw std::runtime_error("invalid live marker was accepted");
     };
     try {
+        const auto rejectsAbi = [&](std::string_view compositor, std::string_view client) {
+            try { Hyprveil::requireReviewedAbi(compositor, client); }
+            catch (const std::runtime_error&) { ++passed; return; }
+            throw std::runtime_error("unreviewed or mismatched native ABI was accepted");
+        };
+        Hyprveil::requireReviewedAbi(Hyprveil::REVIEWED_ABI, Hyprveil::REVIEWED_ABI);
+        ++passed;
+        rejectsAbi(Hyprveil::REVIEWED_ABI, "other-client");
+        rejectsAbi("newer-matching-compositor", "newer-matching-compositor");
+        const auto changedDependency = std::string{Hyprveil::REVIEWED_ABI} + "_different-dependency";
+        rejectsAbi(changedDependency, changedDependency);
+        rejectsAbi({}, {});
         rejects(); // Missing file.
+        Hyprveil::requireOptionalLiveMarker(runtime.string(), getpid(), signature, now);
+        if (std::filesystem::exists(marker)) throw std::runtime_error("standard admission created a trial marker");
+        ++passed;
         write(getpid(), signature, "black", now + 3600);
         Hyprveil::requireLiveMarker(runtime.string(), getpid(), signature, now);
         ++passed;
+        Hyprveil::requireOptionalLiveMarker(runtime.string(), getpid(), signature, now);
+        ++passed;
+        write(getpid(), signature, "cancelled", 0);
+        rejects(true); // Cancellation cannot become a standard no-marker load.
+        write(getpid(), signature, "black", now);
+        rejects(true); // Existing expired optional markers also deny admission.
+        write(getpid(), signature, "black", now + 3600);
         chmod(marker.c_str(), 0644);
         rejects();
+        rejects(true);
         write(getpid() + 1, signature, "black", now + 3600);
         rejects();
         write(getpid(), "another-instance", "black", now + 3600);
@@ -52,6 +76,7 @@ int main() {
         std::filesystem::rename(marker, target);
         std::filesystem::create_symlink(target, marker);
         rejects();
+        rejects(true);
         std::filesystem::remove(marker);
         std::filesystem::create_hard_link(target, marker);
         rejects();
@@ -67,7 +92,7 @@ int main() {
         }
         rejects();
         std::filesystem::remove_all(runtime);
-        std::cout << "session guard: " << passed << " filesystem checks passed\n";
+        std::cout << "session guard: " << passed << " ABI/filesystem checks passed\n";
         return 0;
     } catch (const std::exception& error) {
         chmod(runtime.c_str(), 0700);

@@ -118,6 +118,22 @@ def lab_env(runtime, data):
     return env
 
 
+def compositor_env(runtime, standard_plugin_admission=False):
+    env = base_env()
+    for key in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "HYPRLAND_INSTANCE_SIGNATURE", "DBUS_SESSION_BUS_ADDRESS"):
+        env.pop(key, None)
+    env.update(XDG_RUNTIME_DIR=str(runtime), HOME=str(runtime / "home"),
+               XDG_CONFIG_HOME=str(runtime / "home/.config"), XDG_CACHE_HOME=str(runtime / "home/.cache"),
+               XDG_DATA_HOME=str(runtime / "home/.local/share"), LIBSEAT_BACKEND="hyprveil-disabled",
+               HYPRLAND_NO_SD_VARS="1", HYPRLAND_NO_SD_NOTIFY="1", HYPRLAND_NO_RT="1",
+               HYPRVEIL_LAB_RUNTIME=str(runtime))
+    if standard_plugin_admission:
+        # Exercise ordinary plugin admission without weakening the disposable
+        # compositor's seat guard, private runtime or metadata attestation.
+        env.pop("HYPRVEIL_LAB_RUNTIME")
+    return env
+
+
 def run(args):
     parent_runtime = Path(args.parent_runtime).resolve(strict=True)
     parent_display = args.parent_display
@@ -135,14 +151,7 @@ def run(args):
     artifact_dir.mkdir(parents=True)
     config = runtime / "hyprland.lua"
     config.write_text(CONFIG)
-    env = base_env()
-    for key in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "HYPRLAND_INSTANCE_SIGNATURE", "DBUS_SESSION_BUS_ADDRESS"):
-        env.pop(key, None)
-    env.update(XDG_RUNTIME_DIR=str(runtime), HOME=str(runtime / "home"),
-               XDG_CONFIG_HOME=str(runtime / "home/.config"), XDG_CACHE_HOME=str(runtime / "home/.cache"),
-               XDG_DATA_HOME=str(runtime / "home/.local/share"), LIBSEAT_BACKEND="hyprveil-disabled",
-               HYPRLAND_NO_SD_VARS="1", HYPRLAND_NO_SD_NOTIFY="1", HYPRLAND_NO_RT="1",
-               HYPRVEIL_LAB_RUNTIME=str(runtime))
+    env = compositor_env(runtime, getattr(args, "standard_plugin_admission", False))
     # Never export a parent session environment or call uwsm/systemd.
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as parent:
         parent.connect(str(parent_socket))
@@ -167,7 +176,8 @@ def run(args):
             raise RuntimeError(f"no isolated compositor socket; see {artifact_dir / 'hyprland.log'}")
         data = {"runtime_dir": str(runtime), "wayland_display": display, "signature": signature,
                 "pid": child.pid, "parent_signature": os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"),
-                "artifacts": str(artifact_dir), "created": time.time()}
+                "artifacts": str(artifact_dir), "created": time.time(),
+                "standard_plugin_admission": bool(getattr(args, "standard_plugin_admission", False))}
         write_json(runtime / MARKER, data)
         write_json(PROJECT / "artifacts/latest-lab.json", data)
         print(json.dumps({"ready": True, **data}), flush=True)
@@ -203,6 +213,8 @@ def main():
     start = sub.add_parser("run")
     start.add_argument("--parent-runtime", required=True)
     start.add_argument("--parent-display", required=True)
+    start.add_argument("--standard-plugin-admission", action="store_true",
+                       help="omit only the plugin lab marker from the guarded child compositor environment")
     for action in ("ctl", "exec", "stop", "status"):
         command = sub.add_parser(action)
         command.add_argument("--lab-dir", required=True)

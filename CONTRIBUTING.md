@@ -26,4 +26,11 @@ native cached paths and teardown before extending admission. Keep online
 predecessor lists explicit; do not replace exact hashes with a wildcard.
 Preserve third-party notices when adapting upstream definitions.
 
+A release that changes native source needs a new `commit_pins` entry in
+`hyprpm.toml`, mapping the reviewed compositor commit to the actual tested
+plugin source commit. Commit the tested source first, then pin that real commit
+in a separate metadata commit. Do not invent a future hash or pin to an
+untested branch tip. Test privileged hyprpm installation and a cold login in a
+disposable system before describing those paths as validated.
+
 Report suspected privacy disclosures using [SECURITY.md](SECURITY.md).

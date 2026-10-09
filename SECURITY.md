@@ -8,9 +8,20 @@ compositor; a crash can terminate the desktop session.
 
 Review [the capture design and limits](docs/REVIEW.md) and
 [tested coverage](docs/VALIDATION.md) before enabling protection. Keep the
-sanitized renderer loaded in black/omit when changing appearance; unload
-returns to underlying native behavior. Unsupported ABI and unrecognized online
-upgrade predecessors are intentionally refused.
+sanitized renderer loaded in black/omit when changing appearance. Before
+unloading, the plugin revokes its temporary sharing choices and transfers
+effective inherited privacy to native window properties. The native renderer
+then owns capture masking, including its measured FX limitation described in
+the review. Stop active sharing before a native update/reload. Unsupported ABI
+and unrecognized legacy online-upgrade predecessors
+are intentionally refused.
+
+Normal installation uses hyprpm. Native admission checks the reviewed ABI
+before accessing compositor internals; it no longer depends on a Python
+receipt or a temporary live marker. Lab-only mirror diagnostics require the
+isolated session guard. ABI matching does not attest identical ELF bytes,
+compiler behavior or all third-party native modules. Compatibility evidence
+is recorded against the actual tested compositor binary.
 
 ## Report a suspected disclosure
 

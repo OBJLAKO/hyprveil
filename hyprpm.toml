@@ -1,0 +1,10 @@
+[repository]
+name = "hyprveil"
+authors = ["OBJLAKO"]
+
+[hyprveil]
+description = "Keep private windows visible locally and out of screen sharing"
+authors = ["OBJLAKO"]
+output = "build/hyprveil.so"
+build = ["make -j2 all"]
+since_hyprland = 7661

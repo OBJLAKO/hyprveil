@@ -8,10 +8,12 @@ without moving a protected window.
 ## Two independent repositories
 
 - **Hyprveil core** owns capture rendering, privacy inheritance, native Lua
-  configuration, per-window actions, installation and guarded updates. It
+  configuration and per-window actions. Standard hyprpm manages its build,
+  installation and loading. The core
   works on supported plain Hyprland installations.
 - **[omarchy-hyprveil](https://github.com/OBJLAKO/omarchy-hyprveil)** owns the
-  optional bar and panel. It calls the public core API and reports the focused
+  optional bar, panel and first-use terminal installer. Its selective startup
+  helper activates only its validated hyprpm-built Hyprveil artifact. It calls the public core API and reports the focused
   window's effective privacy, including inherited protection.
 
 The GUI needs no private user helper module. The core has no dependency on
@@ -37,16 +39,18 @@ history contains only sanitized pixels.
 
 ## Native integration
 
-All nine settings live in Hyprland's typed Lua registry. `hl.config`,
+All settings live in Hyprland's typed Lua registry. `hl.config`,
 `hl.get_config`, `getoption`, public Lua helpers and controller commands share
 values. Atomic partial configuration rejects invalid patches before mutation.
 Window actions pin both address and immutable identity; the compositor invokes
 no shell for these actions.
 
-The CLI manages a literal settings block and verifies native acknowledgement.
-Installation uses exact ABI/ELF admission rather than version-number guessing.
-Online updates support only reviewed predecessors and hold capture throughout
-privacy handoff.
+The optional CLI manages an existing literal settings block and verifies
+native acknowledgement. Without that block, it reports session-only changes.
+Both the build probe and native module admit only the reviewed ABI. Standard
+hyprpm loading needs no Python receipt or temporary session marker. Legacy
+recovery tools retain exact ELF admission and protected handoff for reviewed
+predecessors; migration to hyprpm is documented as a cold-login operation.
 
 ## Development priorities
 

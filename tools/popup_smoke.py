@@ -234,6 +234,31 @@ def main() -> int:
                   captured_size=[direct.width, direct.height], expected_size=[dw, dh])
         return current
 
+    def unload_inherited_dialog(label):
+        nonlocal loaded
+        dialog = target(title="Hyprveil fixture: transient dialog")
+        fields = ("address", "at", "size", "workspace", "monitor", "floating", "fullscreen")
+        before_geometry = {key: dialog[key] for key in fields}
+        dialog_address = "address:" + dialog["address"]
+        check(label + ": precondition exercises plugin-only inherited privacy",
+              ctl("getprop", dialog_address, "no_screen_share") == "false")
+        if ctl("plugin", "unload", str(plugin)) != "ok":
+            raise RuntimeError("native fallback regression could not unload plugin")
+        loaded = False
+        image = Image(capture(label + ".native-fallback.png"))
+        leakage = color_fraction(image, (0, 0, image.width, image.height), PRIVATE, 3)
+        native_private = ctl("getprop", dialog_address, "no_screen_share") == "true"
+        check(label + ": unload preserves inherited privacy in native capture",
+              native_private and leakage == 0,
+              native_protection=native_private, capture_protected_fraction=leakage)
+        current = target(title="Hyprveil fixture: transient dialog")
+        check(label + ": unload preserves dialog identity and geometry",
+              before_geometry == {key: current[key] for key in fields})
+        if ctl("plugin", "load", str(plugin)) != "ok":
+            raise RuntimeError("could not reload plugin after fallback regression")
+        loaded = True
+        ctl("hyprveil", "omit")
+
     try:
         print("starting a dedicated popup lab", flush=True)
         launcher = subprocess.Popen([sys.executable, str(PROJECT / "tools/lab.py"), "run",
@@ -321,6 +346,14 @@ def main() -> int:
         control("dialog-show", lambda value: value.get("ready") and value["dialog"]["mapped"])
         sample("inherited-transient-dialog" if args.inherit_dialog else "protected-transient-dialog",
                dialog_expected=True)
+        if args.inherit_dialog:
+            unload_inherited_dialog("live-parent-dialog-unload")
+            # Restore native-public status to exercise ancestry retention in
+            # the next cases. The private live parent still protects the child.
+            dialog = target(title="Hyprveil fixture: transient dialog")
+            ctl("eval", 'hl.dispatch(hl.dsp.window.set_prop({window=' +
+                json.dumps("address:" + dialog["address"]) + ',prop="no_screen_share",value="0"}))')
+            sample("inherited-dialog-after-plugin-reload", dialog_expected=True)
         after = artifacts / "popup-clients.after.json"
         after_clients = clients()
         (artifacts / "popup-clients.all-after.json").write_text(json.dumps(after_clients, indent=2) + "\n")
@@ -343,6 +376,8 @@ def main() -> int:
                 current_geometry = {key: current_dialog[key] for key in fields}
                 check(operation + ": same dialog and geometry survive", current_geometry == dialog_geometry,
                       before=dialog_geometry, after=current_geometry)
+            if args.inherit_dialog:
+                unload_inherited_dialog("orphan-dialog-unload")
             # An intentional native false setter releases only this orphan's
             # retained effective policy. Its own native flag is false both
             # before and after; the exported pixels must visibly change.

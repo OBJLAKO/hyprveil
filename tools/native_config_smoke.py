@@ -16,13 +16,14 @@ import sys
 import cairo
 
 from lab import PROJECT
-from service import DEFAULT_APPEARANCE, validate_appearance
+from service import APPEARANCE_ALIASES, APPEARANCE_VARIANTS, DEFAULT_APPEARANCE, validate_appearance
 from spoiler_smoke import PRIVATE, SpoilerSmoke
 
 sys.path.insert(0, str(PROJECT / "tests"))
-from verify_capture import absence_report, color_fraction, opacity_fraction
+from verify_capture import absence_report, color_fraction, differing_fraction, opacity_fraction
 
-FIELDS = ("mode", "image_path", "variant", "color", "grain", "speed", "darkness", "eye", "eye_size")
+LEGACY_APPEARANCE = ("variant", "color", "grain", "speed", "darkness", "eye", "eye_size")
+FIELDS = ("mode", "image_path", *LEGACY_APPEARANCE, "icon", "icon_opacity")
 DEFAULTS = dict(mode="black", image_path="", **DEFAULT_APPEARANCE)
 CALLBACKS = ("configure", "status", "mode", "cycle", "active_privacy", "set_hidden", "toggle", "reset_sharing")
 
@@ -45,10 +46,13 @@ def lua_literal(value):
 def flatten_status(value):
     if not isinstance(value, dict) or value.get("config_api") != 1 or not isinstance(value.get("appearance"), dict):
         raise RuntimeError("native status does not expose config_api 1 and appearance")
+    if value["appearance"].keys() != set(LEGACY_APPEARANCE):
+        raise RuntimeError("native appearance breaks the original seven-field reader schema")
+    appearance = dict(value["appearance"], icon=value.get("icon"), icon_opacity=value.get("icon_opacity"))
     result = {"mode": value.get("mode"), "image_path": value.get("image_path"),
-              **validate_appearance(value["appearance"], canonical=True)}
+              **validate_appearance(appearance, canonical=True)}
     if result.keys() != set(FIELDS):
-        raise RuntimeError("native settings schema differs from the exact nine fields")
+        raise RuntimeError("native settings schema differs from the exact eleven fields")
     return result
 
 
@@ -57,7 +61,7 @@ class NativeConfigSmoke(SpoilerSmoke):
         args.force_shader_failure = False
         super().__init__(args)
         args.suite = "native-config"
-        self.report["native_settings_scope"] = "nine typed config values, atomic Lua patch, commands, dispatchers and callback teardown"
+        self.report["native_settings_scope"] = "eleven typed config values, atomic Lua patch, commands, dispatchers and callback teardown"
         self.base_config = None
 
     def native(self):
@@ -68,8 +72,9 @@ class NativeConfigSmoke(SpoilerSmoke):
 
     def lua_settings(self, getter):
         if getter == "status":
-            source = "local v=hl.plugin.hyprveil.status(); local a=v.appearance; "
-            values = ["v.mode", "v.image_path"] + ["a." + key for key in FIELDS[2:]]
+            source = "local v=hl.plugin.hyprveil.status(); local a=v.appearance; local count=0; "
+            source += "for k in pairs(a) do count=count+1 end; if count~=7 then error('legacy appearance shape changed') end; "
+            values = ["v.mode", "v.image_path"] + ["a." + key for key in LEGACY_APPEARANCE] + ["v.icon", "v.icon_opacity"]
         else:
             source = ""
             values = ["hl.get_config(" + lua_literal("plugin.hyprveil." + key) + ")" for key in FIELDS]
@@ -78,7 +83,7 @@ class NativeConfigSmoke(SpoilerSmoke):
         if len(tokens) != len(FIELDS):
             raise RuntimeError("Lua settings query returned an unexpected field count: " + output)
         result = dict(zip(FIELDS, tokens))
-        for key in ("grain", "speed", "darkness", "eye_size"):
+        for key in ("grain", "speed", "darkness", "eye_size", "icon_opacity"):
             result[key] = int(result[key])
         if result["eye"] not in ("true", "false"):
             raise RuntimeError("Lua eye setting is not boolean")
@@ -89,7 +94,7 @@ class NativeConfigSmoke(SpoilerSmoke):
         result = {}
         for key in FIELDS:
             value = json.loads(self.ctl("-j", "getoption", "plugin:hyprveil:" + key))
-            if key in ("mode", "image_path", "variant", "color"):
+            if key in ("mode", "image_path", "variant", "color", "icon"):
                 result[key] = value["str"]
             elif key == "eye":
                 if "bool" in value:
@@ -146,6 +151,90 @@ class NativeConfigSmoke(SpoilerSmoke):
                           output == "true" and flatten_status(after) == flatten_status(before) and
                           before["policy_generation"] == after["policy_generation"] and
                           self.geometry() == geometry and self.privacy(), argument=argument[:160], argument_length=len(argument))
+
+    def icon_tests(self, before, restore):
+        # A frozen opaque black material isolates the content-free icon pixels.
+        # Export checks still inspect the entire frame for private fixture RGB.
+        selected = dict(DEFAULTS, mode="spoiler", variant="matte", color="#ffffff",
+                        grain=0, speed=0, darkness=100, eye=True, eye_size=128,
+                        icon="none", icon_opacity=100)
+        self.patch(selected)
+        self.settings_agree("native icon none has independent typed settings", selected)
+        off = self.private_frame("icon-none-black", before, black=True)
+        roi = self.roi()
+        icons = {}
+        attempts = self.native()["spoiler_shader_attempts"]
+        for shape in ("eye", "lock", "shield"):
+            self.patch({"icon": shape})
+            selected["icon"] = shape
+            self.settings_agree("native " + shape + " shape routes agree", selected)
+            image = self.private_frame("icon-" + shape + "-opacity100", before)
+            changed = round(differing_fraction(off, roi, image, roi, 2) * roi[2] * roi[3])
+            self.assert_check(shape + " draws visible content-free pixels on opaque black", changed > 50,
+                              changed_pixels=changed)
+            icons[shape] = image
+        for first, second in (("eye", "lock"), ("eye", "shield"), ("lock", "shield")):
+            changed = round(differing_fraction(icons[first], roi, icons[second], roi, 2) * roi[2] * roi[3])
+            self.assert_check(first + " and " + second + " have distinguishable native vector geometry", changed > 50,
+                              changed_pixels=changed)
+        bright = sum(sum(pixel) for pixel in icons["shield"].pixels(roi))
+        self.patch({"icon_opacity": 25})
+        faint = self.private_frame("icon-shield-opacity25", before)
+        faint_energy = sum(sum(pixel) for pixel in faint.pixels(roi))
+        self.assert_check("icon opacity changes displayed brightness without transparency or shader recompilation",
+                          0 < faint_energy < bright * .65 and self.native()["spoiler_shader_attempts"] == attempts,
+                          full_energy=bright, quarter_energy=faint_energy)
+        for label, patch in (("opacity-zero", {"icon_opacity": 0}),
+                             ("legacy-eye-false", {"icon_opacity": 100, "eye": False}),
+                             ("none-selected", {"eye": True, "icon": "none"})):
+            self.patch(patch)
+            image = self.private_frame("icon-" + label, before, black=True)
+            self.assert_check(label + " hides the chosen vector exactly", differing_fraction(off, roi, image, roi, 0) == 0)
+        self.patch({"icon": "eye", "eye_size": 40})
+        small = self.private_frame("icon-eye-size40", before)
+        small_pixels = round(differing_fraction(off, roi, small, roi, 2) * roi[2] * roi[3])
+        large_pixels = round(differing_fraction(off, roi, icons["eye"], roi, 2) * roi[2] * roi[3])
+        self.assert_check("generic icon size preserves visible geometry at both bounds",
+                          small_pixels > 10 and large_pixels > small_pixels * 2,
+                          small_pixels=small_pixels, large_pixels=large_pixels)
+
+        # Existing seven-field clients must not reset a newly chosen shape.
+        self.patch({"icon": "shield", "icon_opacity": 31})
+        original = ["telegram", "#abcdef", "17", "0", "100", "1", "80"]
+        self.ctl("hyprveil", "appearance", *original)
+        expected = dict(DEFAULTS, mode="spoiler", variant="signal", color="#abcdef", grain=17,
+                        speed=0, darkness=100, eye=True, eye_size=80, icon="shield", icon_opacity=31)
+        self.settings_agree("legacy seven-field command canonicalizes alias and preserves icon choices", expected)
+        self.ctl("hyprveil", "appearance", *original, "lock", "64")
+        expected.update(icon="lock", icon_opacity=64)
+        self.settings_agree("extended nine-field command selects icon and opacity atomically", expected)
+        self.patch(restore)
+        self.settings_agree("icon checks restore full caller configuration", restore)
+
+    def variant_tests(self, before, restore):
+        variants = ("prism", "signal", "aurora", "contour", "radar", "matte",
+                    "error404", "matrix", "anonymous", "glass")
+        self.assert_check("public native material enum preserves the original six and appends all four new styles",
+                          tuple(APPEARANCE_VARIANTS) == variants)
+        aliases = {"satin": "prism", "telegram": "signal", "grid": "radar", "404": "error404",
+                   "cmatrix": "matrix", "anon": "anonymous", "liquid-glass": "glass", "liquidglass": "glass"}
+        self.assert_check("material aliases remain explicit and bounded", APPEARANCE_ALIASES == aliases)
+        selected = dict(restore, mode="spoiler", color="#ffffff", speed=0, darkness=35, eye=False)
+        self.patch(selected)
+        for variant in variants:
+            # Updating one enum field must preserve the other ten native fields
+            # in both typed settings and rendered capture behavior.
+            self.patch({"variant": variant})
+            selected["variant"] = variant
+            self.settings_agree("native " + variant + " single-field selection preserves all eleven values", selected)
+            self.private_frame("enum-" + variant, before)
+        for alias, canonical in APPEARANCE_ALIASES.items():
+            self.patch({"variant": alias})
+            selected["variant"] = canonical
+            self.settings_agree("legacy " + alias + " alias canonicalizes in every native route", selected)
+            self.private_frame("enum-alias-" + alias, before)
+        self.patch(restore)
+        self.settings_agree("material enum checks restore full caller configuration", restore)
 
     def focused_privacy(self):
         return json.loads(self.ctl("hyprveil", "active-privacy"))
@@ -343,13 +432,13 @@ class NativeConfigSmoke(SpoilerSmoke):
         self.ctl("dismissnotify", "-1")
         self.report["compositor"] = json.loads(self.ctl("-j", "version"))
         plugins = json.loads(self.ctl("-j", "plugin", "list"))
-        self.assert_check("loaded module is exactly native-config release 0.4.0",
-                          any(item["name"] == "hyprveil" and item["version"] == "0.4.0" for item in plugins))
+        self.assert_check("loaded module is exactly native-config release 0.5.0",
+                          any(item["name"] == "hyprveil" and item["version"] == "0.5.0" for item in plugins))
         before = self.geometry()
         self.settings_agree("initial safe native defaults", DEFAULTS)
         self.private_frame("initial-black", before, black=True)
 
-        configured = dict(DEFAULTS, mode="spoiler", variant="telegram", color="#aabbcc", grain=17,
+        configured = dict(DEFAULTS, mode="spoiler", variant="signal", color="#aabbcc", grain=17,
                           speed=0, darkness=31, eye=False, eye_size=128)
         self.patch(configured)
         self.settings_agree("atomic Lua full table", configured)
@@ -357,6 +446,8 @@ class NativeConfigSmoke(SpoilerSmoke):
         self.patch({"color": "#ABCDEF", "grain": 100})
         configured.update(color="#abcdef", grain=100)
         self.settings_agree("atomic Lua partial table canonicalizes color and preserves remaining fields", configured)
+        self.icon_tests(before, configured)
+        self.variant_tests(before, configured)
 
         self.ctl("hyprveil", "black")
         configured["mode"] = "black"
@@ -409,7 +500,8 @@ class NativeConfigSmoke(SpoilerSmoke):
                    "{grain=1.5}", "{grain=0/0}", "{speed=math.huge}", "{grain=-1}",
                    "{grain=101}", "{speed=201}", "{darkness=101}", "{eye=1}",
                    "{eye_size=39}", "{eye_size=129}", '{variant="blur"}', '{mode="off"}',
-                   '{color="#fff"}', '{mode="image",image_path=""}',
+                   '{color="#fff"}', '{icon="unknown"}', '{icon=true}', '{icon_opacity=-1}',
+                   '{icon_opacity=101}', '{icon_opacity=1.5}', '{icon_opacity="50"}', '{mode="image",image_path=""}',
                    lua_literal({"mode": "image", "image_path": str(self.runtime / "missing.png")}),
                    lua_literal({"image_path": "relative.png"}), lua_literal({"image_path": "bad\x00name"}),
                    lua_literal({"image_path": "/tmp/bad\nname"}), lua_literal({"image_path": "/" + "x" * 4096}),
@@ -421,17 +513,18 @@ class NativeConfigSmoke(SpoilerSmoke):
             self.rejection(index, argument)
         self.private_frame("after-all-invalid-patches", before, black=True)
 
-        selected = dict(DEFAULTS, mode="spoiler", variant="telegram", grain=37, speed=0,
+        selected = dict(DEFAULTS, mode="spoiler", variant="signal", grain=37, speed=0,
                         color="#4488aa", darkness=12, eye=True, eye_size=40)
         self.write_config(selected)
         self.assert_check("typed native file reload has no compositor config errors", not self.ctl("configerrors"))
-        self.settings_agree("native file reload selects all nine fields", selected)
+        self.settings_agree("native file reload selects all eleven fields", selected)
         self.private_frame("native-file-telegram", before)
         local = self.local_image("native-file-local")
         self.assert_check("native settings leave original local window fully visible",
                           color_fraction(local, self.roi(), PRIVATE, 3) >= 0.99)
         for label, invalid_field in (("grain-range", {"grain": 101}), ("grain-boolean", {"grain": True}),
-                                     ("eye-integer", {"eye": 1})):
+                                     ("eye-integer", {"eye": 1}), ("icon-name", {"icon": "bad"}),
+                                     ("icon-opacity-range", {"icon_opacity": 101})):
             # The file explicitly requests spoiler. Validation failure must
             # override that request in the rendered AND registered mode.
             self.write_config(dict(selected, **invalid_field))

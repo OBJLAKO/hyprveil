@@ -1,4 +1,8 @@
-# A session-pinned manual trial
+# Legacy session-pinned manual trial
+
+For ordinary installation use [hyprpm](HOST-SETUP.md). This helper is retained
+for explicitly reviewed development/recovery trials; do not combine its loader
+with hyprpm in the same session.
 
 The manual helper loads a copied, pinned release into one selected Hyprland
 process. It adds no autoload, keybinding or shell plugin and does not rewrite
@@ -33,15 +37,19 @@ runtime ownership and mapped release before control. New loading also checks
 the header ABI and running/installed compositor ELF. Snapshots and the immutable
 release copy remain in ignored local `artifacts/`; private state is mode `0600`.
 
-Native admission requires the owned `0700` runtime and a single-link,
-non-symlink `0600` marker for that exact process and instance. The helper's
+When a trial marker exists, native admission requires the owned `0700` runtime
+and a single-link, non-symlink `0600` marker for that exact process and instance.
+Normal hyprpm loading needs no marker. The helper's
 two-hour marker authorizes admission only: expiry does not unload an already
 loaded plugin or choose a different effect.
 
 The exact release needs permission from initial configuration or explicit
 compositor consent. Runtime `hl.permission` evaluation is not treated as a
 grant. A refused or timed-out load removes admission so a delayed consent
-response cannot load it later. The helper does not weaken permissions.
+response cannot load it later. Cancellation leaves an owned `cancelled/0`
+tombstone, rather than deleting the marker. A new explicit prepare/start can
+rearm it; compositor runtime cleanup removes it. The helper does not weaken
+permissions.
 
 Manual loading requires an acknowledged black initial mode. Existing Lua
 settings selecting another mode during load reparse can cause this strict
@@ -52,7 +60,7 @@ native configuration loading separately.
 
 ```sh
 python3 tools/session.py spoiler
-python3 tools/session.py configure --variant telegram --grain 35 --speed 70
+python3 tools/session.py configure --variant aurora --grain 35 --speed 70
 python3 tools/session.py omit
 python3 tools/session.py image /absolute/path/replacement.png
 python3 tools/session.py black
@@ -60,7 +68,7 @@ python3 tools/session.py status
 ```
 
 Protected windows remain visible locally at the same position and size.
-Spoilers are opaque procedural masks with an optional crossed eye. Private
+Spoilers are opaque procedural masks with a configurable eye, lock or shield. Private
 popups are omitted; direct protected-window exports are black. Malformed
 images or failed shader resources fall back to black.
 
@@ -80,8 +88,10 @@ python3 tools/session.py black
 python3 tools/session.py unload
 ```
 
-`black` retains the sanitized scene. `unload` removes it and its marker;
-native rules remain, but plugin inheritance and rendering do not. Native
+`black` retains the sanitized scene. `unload` removes the custom renderer and
+cancels its trial marker. The current module promotes effective inherited
+privacy to native properties before unloading, while older releases did not.
+Plugin inheritance no longer applies to future windows while unloaded. Native
 masking showed deformed-edge disclosure with the reviewed FX plugin, so
 unloading is not equivalent to selecting black or omit.
 

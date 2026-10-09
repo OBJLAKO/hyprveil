@@ -78,7 +78,8 @@ def frame(local, masked, variant, path):
     roundrect(ctx, 839, 26, 89, 29, 14.5)
     ink(ctx, "263f35")
     ctx.fill()
-    text(ctx, 854 if variant == "Satin" else 848, 45, variant.upper(), 11, "c0e0ce", True)
+    label = {"glass": "Liquid Glass", "error404": "404"}.get(variant.lower(), variant).upper()
+    text(ctx, 845 if label == "LIQUID GLASS" else 871, 45, label, 11, "c0e0ce", True)
     picture(ctx, local, 32, 110, 434, 271.25)
     picture(ctx, masked, 494, 110, 434, 271.25)
     ink(ctx, "82a994")
@@ -102,7 +103,7 @@ def social(local, masked, path):
     text(ctx, 951, 91, "NATIVE HYPRLAND", 13, "a4c3b0", True)
     text(ctx, 60, 205, "Your screen.", 22, "dce9dd", True)
     text(ctx, 660, 205, "Shared capture.", 22, "dce9dd", True)
-    text(ctx, 1107, 203, "TELEGRAM", 12, "a9d2ba", True)
+    text(ctx, 1107, 203, "LIQUID GLASS", 12, "a9d2ba", True)
     picture(ctx, local, 60, 230, 560, 350)
     picture(ctx, masked, 660, 230, 560, 350)
     text(ctx, 60, 616, "Your window stays visible. The capture gets a veil.", 17, "bad0bf")
@@ -123,7 +124,7 @@ def main():
     if not report.get("ok") or not report.get("lab_stopped") or report.get("cleanup_errors"):
         raise RuntimeError("refusing unsuccessful or running lab media")
     expected = {variant: [variant + "-%03d.png" % index for index in range(24)]
-                for variant in ("satin", "telegram")}
+                for variant in ("glass", "error404")}
     if (report.get("local_frame") != "local.png" or report.get("demo_frames") != expected or
             report.get("native_frame_size") != [800, 500] or
             len(report.get("checks", [])) != 3 or not all(check.get("ok") for check in report["checks"])):
@@ -134,20 +135,19 @@ def main():
         index = 0
         for variant, names in report["demo_frames"].items():
             for name in names:
-                frame(local, source / name, variant.title(), frames / ("%03d.png" % index))
+                frame(local, source / name, {"glass": "Liquid Glass", "error404": "404"}[variant], frames / ("%03d.png" % index))
                 index += 1
         command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-framerate", "10", "-i", str(frames / "%03d.png"),
                    "-filter_complex", "split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle",
                    "-loop", "0", str(ASSETS / "demo.gif")]
         subprocess.run(command, check=True)
-    frame(local, source / report["demo_frames"]["telegram"][0], "Telegram", ASSETS / "demo/poster.png")
-    social(local, source / report["demo_frames"]["telegram"][0], ASSETS / "social-preview.png")
-    outputs = ("hero.svg", "demo.gif", "social-preview.png", "demo/poster.png")
+    frame(local, source / report["demo_frames"]["glass"][0], "Liquid Glass", ASSETS / "demo/poster.png")
+    outputs = ("demo.gif", "demo/poster.png")
     provenance = {"version": 1, "native_sha256": report["plugin_sha256"],
                   "source": "real Hyprland GPU captures in a fresh marked isolated compositor",
                   "content": "GTK notes fixture with explicitly synthetic text; no personal desktop or files",
                   "frames": index, "display_fps": 10, "native_frame_size": report["native_frame_size"],
-                  "variants": ["satin", "telegram"], "appearance": report["demo_settings"],
+                  "variants": ["glass", "error404"], "appearance": report["demo_settings"],
                   "local_document_marker_visible": True, "marker_absent_from_every_protected_frame": True,
                   "lab_stopped": True,
                   "processing": "crop-free scaling, rounded framing, labels, GIF palette quantization; no synthesized mask pixels or interpolated motion",
