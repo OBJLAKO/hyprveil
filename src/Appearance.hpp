@@ -43,7 +43,7 @@ struct Appearance {
         return 0;
     }
     static bool validIcon(std::string_view name) {
-        return name == "eye" || name == "lock" || name == "shield" || name == "none";
+        return name == "eye" || name == "lock" || name == "shield" || name == "none" || name == "custom";
     }
     bool animated() const { return variant != "matte" && speed > 0 && darkness < 100 && color != "#000000"; }
     std::array<float, 3> tint() const {

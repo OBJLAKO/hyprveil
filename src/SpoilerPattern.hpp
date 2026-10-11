@@ -32,6 +32,8 @@ uniform vec3 tint;
 uniform float grainAmount;
 uniform float darkness;
 uniform int variant;
+uniform float radius;
+uniform float roundingPower;
 in vec2 v_texcoord;
 out vec4 fragColor;
 
@@ -136,6 +138,12 @@ vec3 glassLens(vec3 behind, vec2 p, vec2 center, vec2 extent, float radius, floa
 
 void main() {
     vec2 uv = v_texcoord;
+    float r = clamp(radius, 0.0, min(fullSize.x, fullSize.y) * .5);
+    vec2 q = abs((uv - .5) * fullSize) - (fullSize * .5 - r);
+    float power = max(roundingPower, 1.0);
+    vec2 corner = max(q, 0.0);
+    float distance = pow(pow(corner.x, power) + pow(corner.y, power), 1.0 / power) + min(max(q.x, q.y), 0.0) - r;
+    if (distance > 0.0) discard;
     vec2 px = uv * fullSize;
     vec2 p = (uv - .5) * vec2(fullSize.x / max(fullSize.y, 1.0), 1.0);
     // Motion is low-frequency geometry, never flashing source-derived pixels.
@@ -333,7 +341,7 @@ inline cairo_surface_t* icon(std::string_view shape) {
     cairo_set_line_cap(paint, CAIRO_LINE_CAP_ROUND);
     cairo_set_line_join(paint, CAIRO_LINE_JOIN_ROUND);
     if (shape == "eye") {
-        // Exact mirrored curves and a concentric pupil, with no uneven slash.
+        // Sensitive-content glyph: balanced curves and a clean diagonal slash.
         cairo_move_to(paint, 24, 64);
         cairo_curve_to(paint, 40, 42, 52, 38, 64, 38);
         cairo_curve_to(paint, 76, 38, 88, 42, 104, 64);
@@ -342,6 +350,18 @@ inline cairo_surface_t* icon(std::string_view shape) {
         cairo_close_path(paint);
         cairo_stroke(paint);
         cairo_arc(paint, 64, 64, 11.5, 0, 6.283185307);
+        cairo_stroke(paint);
+        // Clear a narrow gap where the slash crosses the eye before drawing
+        // it. This stays legible at stream-thumbnail sizes without a badge.
+        cairo_set_operator(paint, CAIRO_OPERATOR_CLEAR);
+        cairo_set_line_width(paint, 9.0);
+        cairo_move_to(paint, 32, 32);
+        cairo_line_to(paint, 96, 96);
+        cairo_stroke(paint);
+        cairo_set_operator(paint, CAIRO_OPERATOR_OVER);
+        cairo_set_line_width(paint, 3.4);
+        cairo_move_to(paint, 32, 32);
+        cairo_line_to(paint, 96, 96);
         cairo_stroke(paint);
     } else if (shape == "lock") {
         cairo_move_to(paint, 46, 55);

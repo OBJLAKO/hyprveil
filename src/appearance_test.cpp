@@ -12,7 +12,7 @@ int main() {
         const auto parsed = Hyprveil::Appearance::parse(std::string{alias} + " #ffffff 50 100 50 1 80");
         assert(parsed && parsed->variant == Hyprveil::Appearance::canonicalVariant(alias));
     }
-    for (const auto shape : {"eye", "lock", "shield", "none"}) {
+    for (const auto shape : {"eye", "lock", "shield", "none", "custom"}) {
         for (const auto opacity : {0, 75, 100}) {
             const auto parsed = Hyprveil::Appearance::parse(std::string{"aurora #ffffff 50 100 50 1 80 "} + shape + " " + std::to_string(opacity));
             assert(parsed && parsed->icon == shape && parsed->iconOpacity == opacity);

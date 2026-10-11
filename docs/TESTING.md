@@ -121,7 +121,9 @@ readback. Never crop the personal desktop to obtain a local test reference.
 | `portal_smoke.py` | Continuous Chromium readbacks through private XDP/XDPH, PipeWire and a private D-Bus session. Requires an existing marked lab and those services. |
 | `lock_smoke.py` | Lock acknowledgment ordering, black locked export and rotated output refusal. |
 | `cursor_smoke.py` | Requested/cursor-free/region cursor behavior over the synthetic scene. |
-| `fx_smoke.py --fx-plugin /absolute/path/omarchy-fx.so` | Actual private/public transformers and pixel safety. Requires a reviewed compatible FX build. Does not test visual mask inheritance. |
+| `fx_smoke.py --fx-plugin /absolute/path/omarchy-fx.so` | Actual private/public mesh deformation, mask silhouette inheritance and pixel safety. Requires an existing reviewed compatible FX build; it copies that artifact into the owned lab. |
+| `render_geometry_smoke.py` | Native zoom and nonzero-origin region crop, rigid/detached cameras, rounding, fullscreen stacking and fully faded views. |
+| `render_assets_smoke.py` | Four PNG fit modes, color mask, custom procedural GLSL and PNG icon, invalid-resource fallback and file replacement. |
 | `stress.py` | Movement, resize, scale, reload, unload/reload and bounded repeated captures. |
 | `upgrade_smoke.py --old-plugin /absolute/path/reviewed-old.so` | Exact allowlisted predecessor, held gap and weak retention handoff. An optional `--watcher` tests the independent GUI stream. |
 

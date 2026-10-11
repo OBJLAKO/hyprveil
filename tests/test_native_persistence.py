@@ -15,6 +15,7 @@ class NativeController(fixtures.FakeController):
     def __init__(self, config):
         super().__init__(config)
         self.image_path = ""
+        self.render = dict(service.DEFAULT_RENDER)
         self.errors = ""
         self.override = None
         self.reparse_on_load = False
@@ -23,6 +24,7 @@ class NativeController(fixtures.FakeController):
         _, _, _, values = service.parse_lua_settings(service.read_lua_settings(self.lua_path)[0])
         self.mode = values["mode"]
         self.image_path = values["image_path"]
+        self.render = {key: values[key] for key in service.DEFAULT_RENDER}
         self.appearance = {key: values[key] for key in service.DEFAULT_APPEARANCE}
         if self.override:
             self.appearance.update(self.override)
@@ -31,10 +33,12 @@ class NativeController(fixtures.FakeController):
         current = self.native("status")
         if service.native_values(current) != service.native_values(expected):
             raise service.Refused("native settings changed; retry")
-        values = dict(service.native_values(current), **patch)
+        values = service.config_values(dict(service.native_values(current), **patch))
         service.lua_settings_block(values)
+        self.preflight_assets(patch, values)
         self.mode, self.image_path = values["mode"], values["image_path"]
         self.appearance = {key: values[key] for key in service.DEFAULT_APPEARANCE}
+        self.render = {key: values[key] for key in service.DEFAULT_RENDER}
         return self.native("status")
 
     def raw(self, *args):
@@ -55,6 +59,7 @@ class NativeController(fixtures.FakeController):
                 if args[1] == "image":
                     self.image_path = args[2]
                 value.update(config_api=1, image_path=self.image_path)
+                value.update(self.render)
             return json.dumps(value)
         return result
 
@@ -79,6 +84,36 @@ class NativePersistenceTests(unittest.TestCase):
 
     def values(self):
         return service.parse_lua_settings(self.source.read_bytes())[3]
+
+    def test_old_managed_table_defaults_new_render_fields_and_save_adds_them(self):
+        values = self.values()
+        self.source.write_text(service.lua_settings_block(values, include_render=False))
+        self.assertEqual({key: self.values()[key] for key in service.DEFAULT_RENDER}, service.DEFAULT_RENDER)
+        self.controller.run("configure", appearance={"grain": 37})
+        for key in service.DEFAULT_RENDER:
+            self.assertIn((key + " = ").encode(), self.source.read_bytes())
+        self.assertEqual(self.values()["grain"], 37)
+
+    def test_old_native_persistence_does_not_emit_unregistered_render_fields(self):
+        current = self.controller.native("status")
+        for key in service.DEFAULT_RENDER:
+            current.pop(key)
+        self.source.write_text(service.lua_settings_block(self.values(), include_render=False))
+        _, contents, values = self.controller.prepare_lua(current, grain=37)
+        for key in service.DEFAULT_RENDER:
+            self.assertNotIn((key + " = ").encode(), contents)
+            self.assertEqual(values[key], service.DEFAULT_RENDER[key])
+
+    def test_new_paths_roundtrip_as_literals_without_executing_code(self):
+        values = self.values()
+        values.update(shader_path='/tmp/пример "quote"\\and } os.execute("never").frag',
+                      icon_path='/tmp/icon "quoted".png', mask_color="#ABCDEF", image_fit="fit")
+        source = service.lua_settings_block(values).encode()
+        parsed = service.parse_lua_settings(source)[3]
+        self.assertEqual(parsed["shader_path"], values["shader_path"])
+        self.assertEqual(parsed["icon_path"], values["icon_path"])
+        self.assertEqual(parsed["mask_color"], "#abcdef")
+        self.assertEqual(parsed["image_fit"], "fit")
 
     def test_partial_gui_change_preserves_runtime_lua_values_and_mode(self):
         self.controller.mode = "spoiler"

@@ -7,9 +7,13 @@ int main() {
     // regression because its mediump implementation often uses 32 bits.
     assert(shader.find("precision highp int;") != std::string_view::npos);
     // GLSL pow is undefined for negative bases even with exponent 2.0.
-    // Keep signed squares as multiplication; only clamped powers are allowed.
+    // Keep signed squares as multiplication. The rounded-corner norm raises
+    // nonnegative distances only; all other powers have clamped bases.
     for (auto power = shader.find("pow("); power != std::string_view::npos; power = shader.find("pow(", power + 4))
-        assert(shader.substr(power).starts_with("pow(clamp("));
+        assert(shader.substr(power).starts_with("pow(clamp(") ||
+               shader.substr(power).starts_with("pow(corner.") ||
+               shader.substr(power).starts_with("pow(pow(corner."));
+    assert(shader.find("vec2 corner = max(q, 0.0);") != std::string_view::npos);
     assert(Hyprveil::Spoiler::seconds(3600000) == 0.0F);
     const auto longUptime = Hyprveil::Spoiler::seconds(std::numeric_limits<unsigned long long>::max());
     assert(longUptime >= 0 && longUptime < 3600);
@@ -30,15 +34,18 @@ int main() {
         assert(drawn > 250 && drawn < 4000);
         assert(data[0] == 0 && data[127 * 128 + 127] == 0);
         if (std::string_view{shape} == "eye") {
-            // A straight symmetric glyph cannot regress to the uneven slash.
+            // The sensitive-content slash and eye share a centre. A half turn
+            // preserves their shape; a horizontal mirror would reverse slash.
             unsigned difference = 0;
             for (int y = 0; y < 128; ++y)
                 for (int x = 0; x < 128; ++x) {
                     const auto a = static_cast<int>(data[y * 128 + x] >> 24);
-                    const auto b = static_cast<int>(data[y * 128 + 127 - x] >> 24);
+                    const auto b = static_cast<int>(data[(127 - y) * 128 + 127 - x] >> 24);
                     difference += a > b ? a - b : b - a;
                 }
             assert(difference < 10000); // Small subpixel raster rounding only.
+            assert((data[36 * 128 + 36] >> 24) > 200); // visible sensitive slash
+            assert((data[92 * 128 + 92] >> 24) > 200);
         }
         cairo_surface_destroy(icon);
     }

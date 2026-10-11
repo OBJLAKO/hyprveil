@@ -23,6 +23,14 @@ isolated session guard. ABI matching does not attest identical ELF bytes,
 compiler behavior or all third-party native modules. Compatibility evidence
 is recorded against the actual tested compositor binary.
 
+Custom PNG backgrounds/icons and local `.frag` shaders are optional inputs.
+The core bounds file reads and PNG dimensions, rejects symlinks at every path
+component and renders invalid assets over an opaque synthetic fill. Custom
+GLSL receives synthetic uniforms only; texture/image/buffer declarations and
+preprocessor directives are refused. This is not a GPU sandbox: arbitrary
+arithmetic or loops in trusted local GLSL can still stall the GPU or session.
+Use the built-in styles when predictable rendering cost is required.
+
 ## Report a suspected disclosure
 
 Use GitHub's private vulnerability report on this repository if available.

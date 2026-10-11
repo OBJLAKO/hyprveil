@@ -1,4 +1,8 @@
-# Validation scope
+# Historical validation: 0.5.0
+
+For the 11 October 2026 rendering update, see
+[0.6.0 validation](VALIDATION-0.6.md). The tables below record the older
+candidate and its follow-up; they are not new results for 0.6.0.
 
 The 0.5.0 candidate was exercised on 9 October 2026 in disposable nested
 Hyprland compositors with synthetic content. The parent desktop was not a
@@ -19,7 +23,7 @@ the legacy migration guard is
 `34a496c802b51b30616cf5cac2f52e7eef10c30524c3d306cb106cbe15b25fe7`.
 These identify local evidence, not portable prebuilt downloads.
 
-## Current runtime results
+## Recorded 0.5.0 runtime results
 
 | Runner | Completed result | Evidence scope |
 | --- | --- | --- |

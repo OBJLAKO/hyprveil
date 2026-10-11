@@ -10,7 +10,13 @@
 [Install](#install) · [Styles](#choose-your-style) · [Configure](docs/CONFIGURATION.md) · [Omarchy panel](https://github.com/OBJLAKO/omarchy-hyprveil) · [Compatibility](docs/HOST-SETUP.md)
 </div>
 
-Private windows stay visible on your desktop while Hyprveil changes what appears in **compositor screen captures**. Omit a window, cover it with black, use an opaque animated design, or supply a PNG. Your windows and layout stay in place.
+Private windows stay visible on your desktop while Hyprveil changes what appears in **compositor screen captures**. Omit a window, choose an opaque color or animated design, or supply a PNG. Your windows and layout stay in place.
+
+Masks follow window rounding and native zoom. PNGs support fill, fit, tile and
+stretch; icons and procedural GLSL can come from your own local files. The
+reviewed OmaFX mesh can deform the replacement. See
+[rendering compatibility](docs/COMPATIBILITY.md), including the current
+Glasscope capture limitation.
 
 <div align="center">
 <img src="assets/demo.gif" alt="Synthetic Hyprland capture demonstrating capture-only privacy" width="960">
@@ -156,7 +162,7 @@ Unloading revokes temporary sharing and transfers inherited window privacy to na
 
 Hyprveil covers compositor-mediated capture. **Direct KMS/DRM recording bypasses it.** It cannot retract frames already delivered to another application, protect against an equally privileged native plugin, or guarantee every driver and capture client. Protected direct-window captures, locking, unsupported output transforms and rendering failure use black replacement.
 
-Read the [security scope](SECURITY.md), [technical review](docs/REVIEW.md), and [validation matrix](docs/VALIDATION.md). Tests use disposable compositors and synthetic content; a successful command is never treated as evidence of pixel privacy.
+Read the [security scope](SECURITY.md), [technical review](docs/REVIEW.md), and [current validation](docs/VALIDATION-0.6.md). Tests use disposable compositors and synthetic content; a successful command is never treated as evidence of pixel privacy.
 
 ## Development
 
@@ -164,7 +170,7 @@ Read the [security scope](SECURITY.md), [technical review](docs/REVIEW.md), and 
 make
 python3 -m unittest discover -s tests -p 'test_*.py'
 make test-session-guard test-png-guard test-privacy-policy \
-     test-spoiler-pattern test-appearance test-native-config
+     test-spoiler-pattern test-appearance test-native-config test-render-assets
 ```
 
 [Testing guide](docs/TESTING.md) · [Contributing](CONTRIBUTING.md) · [MIT license](LICENSE)

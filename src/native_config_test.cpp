@@ -7,7 +7,18 @@
 using namespace Hyprveil::NativeConfig;
 int main() {
     const Settings defaults;
-    assert(defaults.mode == "black" && defaults.imagePath.empty() && defaults.values().size() == 11);
+    assert(defaults.mode == "black" && defaults.imagePath.empty() && defaults.values().size() == 15);
+    assert(defaults.maskColor == "#000000" && defaults.imageFit == "stretch" && defaults.shaderPath.empty() && defaults.iconPath.empty());
+    const auto color = defaults.patched({{"mode", std::string{"color"}}, {"mask_color", std::string{"#AaBbCc"}}});
+    assert(color && color->mode == "color" && color->maskColor == "#aabbcc" && color->appearance.color == "#ffffff");
+    const auto blackMode = color->patched({{"mode", std::string{"black"}}});
+    assert(blackMode && blackMode->mode == "black" && blackMode->maskColor == "#aabbcc");
+    for (const auto fit : {"fill", "fit", "tile", "stretch"})
+        assert(defaults.patched({{"image_fit", std::string{fit}}})->imageFit == fit);
+    assert(!defaults.patched({{"image_fit", std::string{"cover"}}}));
+    assert(!defaults.patched({{"image_fit", true}}));
+    assert(!defaults.patched({{"mask_color", std::string{"#00000000"}}}));
+    assert(!defaults.patched({{"mask_color", true}}));
     assert(defaults.appearance.icon == "eye" && defaults.appearance.iconOpacity == 75);
     for (const auto shape : {"eye", "lock", "shield", "none"}) {
         const auto icon = defaults.patched({{"icon", std::string{shape}}, {"icon_opacity", std::int64_t{0}}, {"eye", false}});
@@ -57,6 +68,29 @@ int main() {
     assert(defaults.patched({{"mode", std::string{"image"}}, {"image_path", file.string()}}));
     assert(!defaults.patched({{"mode", std::string{"image"}}, {"image_path", link.string()}}));
     assert(!defaults.patched({{"mode", std::string{"image"}}, {"image_path", std::string{runtime}}}));
+    const auto shader = std::filesystem::path{runtime} / "custom.FRAG";
+    std::ofstream(shader) << "vec4 hyprveil(vec2 uv) { return vec4(uv, 0., 1.); }";
+    const auto custom = defaults.patched({{"shader_path", shader.string()}, {"icon", std::string{"custom"}}, {"icon_path", file.string()}});
+    assert(custom && custom->shaderPath == shader && custom->iconPath == file && custom->appearance.icon == "custom");
+    assert(!defaults.patched({{"icon", std::string{"custom"}}}));
+    auto incompleteRegistry = defaults;
+    incompleteRegistry.appearance.icon = "custom";
+    assert(incompleteRegistry.patched({{"mode", std::string{"black"}}}));
+    assert(!custom->patched({{"icon_path", std::string{}}}));
+    assert(custom->patched({{"icon", std::string{"none"}}, {"icon_path", std::string{}}, {"shader_path", std::string{}}}));
+    assert(!defaults.patched({{"icon_path", link.string()}}));
+    assert(!defaults.patched({{"shader_path", file.string()}}));
+    assert(!defaults.patched({{"shader_path", std::string{runtime}}}));
+    const auto directoryLink = std::filesystem::path{runtime} / "parent";
+    std::filesystem::create_directory_symlink(runtime, directoryLink);
+    assert(!defaults.patched({{"shader_path", (directoryLink / shader.filename()).string()}}));
+    assert(!defaults.patched({{"icon_path", (directoryLink / file.filename()).string()}}));
+    std::ofstream(shader, std::ios::trunc) << std::string(64 * 1024 + 1, 'x');
+    assert(!defaults.patched({{"shader_path", shader.string()}}));
+    std::filesystem::remove(shader);
+    std::filesystem::remove(file);
+    // A removed retained asset cannot prevent the unconditional black mode.
+    assert(custom->patched({{"mode", std::string{"black"}}}));
     std::filesystem::remove_all(runtime);
     std::cout << "native configuration: strict schema, canonical values, atomic rejection and safe path admission passed\n";
 }

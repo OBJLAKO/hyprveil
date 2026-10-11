@@ -1,6 +1,6 @@
 # Native Hyprland configuration
 
-Hyprveil 0.5.0 registers its settings in Hyprland's native registry. Lua,
+Hyprveil registers its settings in Hyprland's native registry. Lua,
 dispatchers, existing `hyprctl hyprveil` commands, the CLI and the Omarchy
 panel use the same values. Runtime changes damage the capture scene
 immediately, including frozen spoilers in static `copy_with_damage` streams.
@@ -14,6 +14,10 @@ if not missing then
   hl.config({ plugin = { hyprveil = {
     mode = "spoiler",
     image_path = "",
+    image_fit = "stretch",
+    mask_color = "#000000",
+    shader_path = "",
+    icon_path = "",
     variant = "prism",
     color = "#ffffff",
     grain = 50,
@@ -35,16 +39,20 @@ replacement; a normal configuration reload then applies user settings.
 
 | Setting | Accepted value | Default |
 | --- | --- | --- |
-| `mode` | `black`, `omit`, `spoiler`, `image` | `black` (native admission) |
+| `mode` | `black`, `color`, `omit`, `spoiler`, `image` | `black` (native admission) |
 | `image_path` | Empty or an absolute PNG path, at most 4096 bytes | `""` |
+| `image_fit` | `fill`, `fit`, `tile`, `stretch` | `stretch` |
+| `mask_color` | Opaque `#RRGGBB` fill, normalized to lowercase | `#000000` |
+| `shader_path` | Empty or an absolute `.frag` source path, at most 4096 bytes | `""` |
+| `icon_path` | Empty or an absolute custom PNG path, at most 4096 bytes | `""` |
 | `variant` | `prism`, `signal`, `aurora`, `contour`, `radar`, `matte`, `error404`, `matrix`, `anonymous`, `glass` | `prism` |
-| `color` | Opaque `#RRGGBB`, normalized to lowercase | `#ffffff` |
+| `color` | Spoiler accent in `#RRGGBB`, normalized to lowercase | `#ffffff` |
 | `grain` | Integer 0–100 | 50 |
 | `speed` | Integer 0–200; zero freezes animation | 100 |
 | `darkness` | Integer 0–100; 100 is black | 50 |
 | `eye` | Boolean; legacy visibility switch for any icon | `true` |
 | `eye_size` | Icon size, integer 40–128 logical pixels | 80 |
-| `icon` | `eye`, `lock`, `shield`, `none` | `eye` |
+| `icon` | `eye`, `lock`, `shield`, `none`, `custom` | `eye` |
 | `icon_opacity` | Integer 0–100 | 75 |
 
 The older style names `satin`, `telegram` and `grid` are accepted and normalized
@@ -53,9 +61,17 @@ to `prism`, `signal` and `radar`. Additional aliases are `404` → `error404`,
 `glass`. `icon="none"`, `eye=false` or zero opacity
 removes the icon. Icon opacity blends only with the opaque synthetic mask.
 The `eye`/`eye_size` names remain compatible with older configuration files.
-Update the optional CLI/panel together with the 0.5 core. Historical clients
+`icon="custom"` uses `icon_path` and the same size, visibility and opacity controls.
+Update the optional CLI/panel together with the core. Historical clients
 that hardcode only the old two style names cannot interpret the new canonical
 styles, even though native status keeps the API 1 field layout.
+
+`color` retains its original role as the spoiler accent. The separate
+`mask_color` selects the opaque fill in `mode="color"`, the background behind
+transparent PNG pixels or `fit` letterboxing, and the custom-shader fallback.
+The legacy `mode="black"` always produces black, regardless of `mask_color`;
+safety fallback commands continue to use that mode. Existing Lua tables may
+omit the four new fields: they receive the defaults above.
 
 Integers reject strings, fractions, booleans and out-of-range values. Enums
 and colors reject unsupported spellings; `eye` requires a Lua boolean.
@@ -75,15 +91,18 @@ need a continuously running effect.
 local p = hl.plugin.hyprveil
 if p and p.configure then
   local state, err = p.configure({ variant = "signal", grain = 35, speed = 70 })
-  -- Success: config_api, mode, image_path, appearance and icon settings.
+  -- Success: config_api, mode, image_path, appearance and rendering settings.
   -- Invalid input: nil, err; previous values remain intact.
 end
 ```
 
 `hl.plugin.hyprveil.status()` returns the same minimal configuration table.
 For API 1 compatibility, native `appearance` retains its original seven fields;
-`icon` and `icon_opacity` are top-level status fields. The optional Python client
-and panel combine these into their appearance model. It includes no window
+`icon` and `icon_opacity` are top-level status fields. `mask_color`, `image_fit`,
+`shader_path` and `icon_path` are also top-level fields. The optional Python client
+combines the two icon fields into its nine-field appearance model and retains
+the other rendering fields separately. CLI `status` exposes these fields and
+`image_path` in both its outer envelope and nested native status. It includes no window
 titles, application contents or client list. All public functions disappear
 when the plugin unloads.
 
@@ -112,6 +131,76 @@ The cycle is black → spoiler → omit → black; an image starts at black.
 `hyprveil:mode image` uses the configured path. The native
 `hl.get_config("plugin.hyprveil.grain")` and `getoption` agree, including
 after an older appearance command or panel action.
+
+## Image layout and color fill
+
+```sh
+hyprveil color '#18212b'
+hyprveil black
+hyprveil image /absolute/path/replacement.png --fit fit
+hyprveil configure --image-fit fill --mask-color '#18212b'
+hyprveil configure --image-path /absolute/path/another.png
+```
+
+`color` without a color argument reuses the current `mask_color`, initially
+black. `black` remains an independent, strictly black mode. A partial
+`configure` command preserves the active mode and every untouched setting;
+changing `image_path` while another mode is active prepares the next image.
+An empty image path is allowed only while image mode is inactive.
+
+`stretch` fills the window and can change the image's proportions; it preserves
+the previous default behavior. `fill` preserves proportions and crops the
+centered image to cover the window. `fit` preserves the complete centered image
+and fills the remaining area with `mask_color`. `tile` repeats the image at its
+native size. Transparent image pixels blend over `mask_color`, never over the
+protected application. PNGs must be regular files within the existing bounds:
+16 MiB encoded, 8192 pixels per edge, 16,777,216 pixels and 64 MiB decoded.
+
+## Custom spoiler shaders and PNG icons
+
+```sh
+hyprveil spoiler --shader-path /absolute/path/effect.frag
+hyprveil configure --shader-path ''
+hyprveil configure --icon custom --icon-path /absolute/path/icon.png
+hyprveil configure --icon none --icon-path ''
+```
+
+A nonempty `shader_path` replaces the selected built-in spoiler while
+`mode="spoiler"` is active. Clearing it restores the selected built-in variant.
+The file must be a nonempty regular UTF-8 `.frag` source of at most 64 KiB.
+The shader and custom-icon paths must be absolute and contain no symlinks,
+including linked parent directories. Custom icons use the same PNG bounds as
+replacement images; their transparent pixels reveal only the opaque mask below.
+To clear `icon_path`, select a built-in icon or `none` in the same atomic update.
+
+Provide a function, without `#version`, a separate `main` or resource declarations:
+
+```glsl
+vec4 hyprveil(vec2 uv) {
+    float wave = 0.5 + 0.5 * sin(uv.x * 12.0 + time);
+    return vec4(mix(maskColor, tint, wave * (1.0 - darkness)), 1.0);
+}
+```
+
+The wrapper supplies `fullSize` (`vec2`, replacement size), `time` (`float`,
+bounded seconds scaled by `speed / 100`), `tint` (`vec3`, the spoiler accent),
+`grainAmount`, `darkness` (both `float`, normalized to 0–1), and `maskColor`
+(`vec3`). `uv` spans 0–1. Zero speed freezes time. A shader whose `time` uniform
+is optimized out needs no continuous animation timer.
+
+The wrapper controls rounding, clamps output RGB and forces opaque alpha;
+nonfinite RGB uses `mask_color`. It exposes no protected-window or framebuffer
+sampler. Preprocessor directives, backslashes, custom uniforms, samplers,
+images, atomics and resource buffers are refused outside comments. Invalid
+GLSL can still be saved as a configuration choice: compilation or resource
+failure renders the opaque `mask_color` fallback. Missing or unsafe newly
+selected files may be refused before changing native settings. If a retained
+file disappears later, the renderer keeps an opaque replacement and the
+`black` command remains available.
+
+Use trusted local shaders. The source-size bound and resource restrictions do
+not bound arbitrary GLSL arithmetic or loops; expensive custom code can stall
+the GPU. The built-in styles remain the supported option for predictable cost.
 
 ## Window privacy API
 
@@ -183,8 +272,11 @@ private backups.
 All ten styles generate opaque synthetic pixels inside the sanitized capture
 scene. The optional icon is drawn over that opaque replacement. Neither the
 shader nor the icon samples or blurs protected application pixels. Ordinary
-window borders, rounding, local blur and FX mesh deformation are outside the
-mask's appearance settings. The glass effect simulates refraction of its own
+window borders and local blur remain outside the mask's appearance settings.
+Rounding follows the native window; the reviewed OmaFX mesh can deform the
+synthetic replacement. See [rendering compatibility](COMPATIBILITY.md) for
+the supported transformer and the Glasscope capture limitation.
+The glass effect simulates refraction of its own
 synthetic scene; it cannot reveal the protected application. Use `eye=false`
 or `icon="none"` if you prefer the 404 or Anonymous artwork without an overlaid
 icon. KMS/DRM capture bypasses this scene.

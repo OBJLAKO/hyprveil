@@ -2,6 +2,7 @@
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import unittest
@@ -56,6 +57,132 @@ class NativeCLITests(unittest.TestCase):
         self.assertEqual(result["appearance"]["grain"], 71)
         self.assertEqual(self.source.read_bytes(), before)
         self.assertFalse(self.controller.state_path.exists())
+
+    def test_color_fill_does_not_change_spoiler_tint_and_black_remains_black(self):
+        self.controller.appearance["color"] = "#aabbcc"
+        colored = self.controller.run("color", appearance={"mask_color": "#1A2B3C"})
+        self.assertEqual((colored["mode"], colored["mask_color"], colored["appearance"]["color"]),
+                         ("color", "#1a2b3c", "#aabbcc"))
+        black = self.controller.run("black")
+        self.assertEqual(black["mode"], "black")
+        self.assertEqual(black["mask_color"], "#1a2b3c")
+        self.assertNotIn(("reload",), self.controller.commands)
+
+    def test_render_status_fields_are_top_level_in_both_envelopes(self):
+        self.controller.render.update(mask_color="#123456", image_fit="tile")
+        result = self.controller.run("status")
+        for key, value in self.controller.render.items():
+            self.assertEqual(result[key], value)
+            self.assertEqual(result["status"][key], value)
+            self.assertNotIn(key, result["appearance"])
+        self.assertEqual(result["image_path"], result["status"]["image_path"])
+
+    def test_partial_image_fit_preserves_mode_image_path_and_other_values(self):
+        image = self.root / "retained.png"
+        image.write_bytes(fixtures.fixtures.png())
+        self.controller.run("image", image=image)
+        self.controller.appearance["grain"] = 81
+        for fit in service.IMAGE_FITS:
+            result = self.controller.run("configure", appearance={"image_fit": fit, "mask_color": "#123456"})
+            self.assertEqual((result["mode"], result["image_path"], result["image_fit"]), ("image", str(image), fit))
+            self.assertEqual(result["appearance"]["grain"], 81)
+        saved = service.parse_lua_settings(self.source.read_bytes())[3]
+        self.assertEqual(saved["mask_color"], "#123456")
+        self.assertNotIn(("reload",), self.controller.commands)
+
+    def test_custom_shader_text_is_saved_without_compiling_or_executing_it(self):
+        shader = self.root / "a custom.FRAG"
+        shader.write_text("this is intentionally invalid GLSL, not executable Lua\n")
+        result = self.controller.run("spoiler", appearance={"shader_path": str(shader)})
+        self.assertEqual(result["mode"], "spoiler")
+        self.assertEqual(result["shader_path"], str(shader))
+        self.assertEqual(service.parse_lua_settings(self.source.read_bytes())[3]["shader_path"], str(shader))
+        self.assertNotIn(("reload",), self.controller.commands)
+        cleared = self.controller.run("configure", appearance={"shader_path": ""})
+        self.assertEqual(cleared["shader_path"], "")
+
+    def test_custom_icon_patch_is_atomic_and_can_be_cleared_with_builtin_selection(self):
+        image = self.root / "icon with spaces"
+        image.write_bytes(fixtures.fixtures.png())
+        result = self.controller.run("configure", appearance={"icon": "custom", "icon_path": str(image), "icon_opacity": 31})
+        self.assertEqual((result["appearance"]["icon"], result["icon_path"], result["appearance"]["icon_opacity"]),
+                         ("custom", str(image), 31))
+        cleared = self.controller.run("configure", appearance={"icon": "none", "icon_path": ""})
+        self.assertEqual((cleared["appearance"]["icon"], cleared["icon_path"]), ("none", ""))
+
+    def test_removed_retained_assets_do_not_prevent_black_fallback(self):
+        shader = self.root / "removed.frag"
+        shader.write_text("invalid GLSL but valid source text")
+        icon = self.root / "removed.png"
+        icon.write_bytes(fixtures.fixtures.png())
+        self.controller.run("configure", appearance={"shader_path": str(shader), "icon": "custom", "icon_path": str(icon)})
+        shader.unlink()
+        icon.unlink()
+        self.assertEqual(self.controller.run("black")["mode"], "black")
+
+    def test_incomplete_direct_lua_icon_configuration_does_not_block_black(self):
+        # Native registry assignments arrive separately; a user can select
+        # custom before assigning its path. Safety mode must remain available.
+        self.controller.mode = "color"
+        self.controller.appearance["icon"] = "custom"
+        self.controller.render.update(mask_color="#123456", icon_path="")
+        self.assertEqual(self.controller.run("black")["mode"], "black")
+
+    def test_new_render_patches_are_refused_before_eval_on_old_native_api(self):
+        current = self.controller.native("status")
+        old = {key: value for key, value in current.items() if key not in service.DEFAULT_RENDER}
+        for patch_value in ({"image_fit": "fit"}, {"mask_color": "#123456"}, {"shader_path": ""},
+                            {"icon_path": ""}, {"mode": "color"}, {"icon": "custom"}):
+            with self.subTest(patch=patch_value), self.assertRaisesRegex(service.Refused, "does not support"):
+                service.Controller.native_configure(self.controller, patch_value, old)
+        self.assertFalse(any(args[0] == "eval" for args in self.controller.commands))
+
+    def test_invalid_new_patch_types_are_refused_before_ipc(self):
+        for key, value in (("mask_color", []), ("mask_color", "#fff"), ("image_fit", {}), ("image_fit", "cover"),
+                           ("shader_path", "relative.frag"), ("shader_path", "/tmp/a.vert"),
+                           ("icon_path", False), ("image_path", "/tmp/a\nb.png"),
+                           ("shader_path", "/tmp/" + chr(0xd800) + ".frag")):
+            with self.subTest(key=key, value=value), self.assertRaises(service.Refused):
+                self.controller.run("configure", appearance={key: value})
+        self.assertEqual(self.controller.commands, [])
+
+    def test_new_asset_preflight_rejects_links_fifo_oversize_and_binary_shader(self):
+        shader = self.root / "safe.frag"
+        shader.write_text("void main() {}")
+        self.assertEqual(self.controller.safe_shader(str(shader)), shader)
+        link = self.root / "linked.frag"
+        link.symlink_to(shader)
+        parent = self.root / "linked-parent"
+        parent.symlink_to(self.root, target_is_directory=True)
+        fifo = self.root / "pipe.frag"
+        os.mkfifo(fifo)
+        for path in (link, parent / shader.name, fifo, self.root / "missing.frag"):
+            with self.subTest(path=path), self.assertRaises((OSError, service.Refused)):
+                self.controller.safe_shader(str(path))
+        for content in (b"\x00", b"\xff", b"x" * (64 * 1024 + 1)):
+            shader.write_bytes(content)
+            with self.subTest(content_size=len(content)), self.assertRaises(service.Refused):
+                self.controller.safe_shader(str(shader))
+
+    def test_real_native_cas_compares_new_top_level_fields_and_normalizes_mask_color(self):
+        current = self.controller.native("status")
+        emitted = []
+        original = self.controller.raw
+
+        def commit(*args):
+            if args[0] == "eval":
+                emitted.append(args[1])
+                self.controller.render.update(mask_color="#aabbcc", image_fit="fit")
+                return "ok"
+            return original(*args)
+
+        with patch.object(self.controller, "raw", side_effect=commit):
+            result = service.Controller.native_configure(self.controller, {"mask_color": "#AABBCC", "image_fit": "fit"}, current)
+        self.assertEqual(result["mask_color"], "#aabbcc")
+        self.assertIn('s.mask_color == "#000000"', emitted[0])
+        self.assertIn('s.image_fit == "stretch"', emitted[0])
+        self.assertIn('mask_color="#aabbcc"', emitted[0])
+        self.assertNotIn("s.appearance.mask_color", emitted[0])
 
     def test_unloaded_mutation_reports_hyprpm_activation_without_loading(self):
         self.controller.loaded = False
@@ -186,6 +313,19 @@ class NativeCLITests(unittest.TestCase):
             self.assertEqual(cli.main(["--signature", "synthetic-instance", "configure", "--runtime", "--grain", "0", "--eye", "off"]), 0)
         constructor.assert_called_once_with("synthetic-instance")
         constructor.return_value.run.assert_called_once_with("configure", None, {"grain": 0, "eye": False}, persist=False)
+
+    def test_cli_exposes_render_fields_without_expanding_appearance(self):
+        for argv, action, image, patch_value in (
+            (["color", "#ABCDEF", "--runtime"], "color", None, {"mask_color": "#ABCDEF"}),
+            (["image", "/tmp/example.png", "--fit", "fit", "--runtime"], "image", Path("/tmp/example.png"), {"image_fit": "fit"}),
+            (["spoiler", "--shader-path", "", "--runtime"], "spoiler", None, {"shader_path": ""}),
+            (["configure", "--icon", "custom", "--icon-path", "/tmp/icon.png", "--image-fit", "tile", "--runtime"],
+             "configure", None, {"icon": "custom", "icon_path": "/tmp/icon.png", "image_fit": "tile"}),
+        ):
+            with self.subTest(argv=argv), patch.object(cli, "Controller") as constructor, patch("sys.stdout", new_callable=io.StringIO):
+                constructor.return_value.run.return_value = {"persisted": False}
+                self.assertEqual(cli.main(argv), 0)
+                constructor.return_value.run.assert_called_once_with(action, image, patch_value, persist=False)
 
     def test_all_ten_materials_are_exposed_by_the_standalone_cli(self):
         for variant in service.APPEARANCE_VARIANTS:

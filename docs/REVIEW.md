@@ -2,8 +2,9 @@
 
 This document describes the reviewed design and its limits. It is not a claim
 that every capture client, application, driver or native plugin is safe.
-[VALIDATION.md](VALIDATION.md) separates current regression results from earlier
-path-specific evidence; [TESTING.md](TESTING.md) explains reproduction.
+[VALIDATION-0.6.md](VALIDATION-0.6.md) records the current rendering regressions;
+[VALIDATION.md](VALIDATION.md) retains earlier path-specific evidence.
+[TESTING.md](TESTING.md) explains reproduction.
 
 ## Threat model
 
@@ -84,8 +85,10 @@ native renderer, including its separately measured FX limitation.
   for a new sanitized serial; they do not prove internal process-memory secrecy.
 - Omission of a private fullscreen window does not reconstruct public windows
   already filtered out by native fullscreen selection; background is accepted.
-- Masks follow current geometry but skip ordinary borders, rounding, local
-  blur and FX grouping. FX-active privacy tests do not prove visual inheritance.
+- Masks follow current geometry and rounding. The reviewed OmaFX mesh receives
+  a cleared synthetic input; unsupported or mixed transformer chains keep the
+  plain mask. Borders, local blur and motion history remain excluded. See
+  [rendering compatibility](COMPATIBILITY.md) for exact scope and screen effects.
 - Native unload exposed deformed edges in the reviewed FX scene. Selecting
   `black` or `omit` keeps the sanitized renderer; unload is not a privacy mode.
 - Mirrored physical output hardware, HDR/color-management combinations,

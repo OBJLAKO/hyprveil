@@ -8,6 +8,7 @@
 #include <climits>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
@@ -22,6 +23,8 @@
 #include <unistd.h>
 
 #include <src/plugins/PluginAPI.hpp>
+#include <src/plugins/PluginSystem.hpp>
+#include <src/render/transformer/Transformer.hpp>
 #include <src/Compositor.hpp>
 #include <src/managers/screenshare/ScreenshareManager.hpp>
 #include <src/desktop/view/Window.hpp>
@@ -33,10 +36,12 @@
 #include <src/pointer/PointerManager.hpp>
 #include <src/managers/input/InputManager.hpp>
 #include <src/managers/SessionLockManager.hpp>
+#include <src/managers/fullscreen/FullscreenController.hpp>
 #include <src/event/EventBus.hpp>
 #include <src/managers/eventLoop/EventLoopManager.hpp>
 #include <src/config/shared/actions/ConfigActions.hpp>
 #include <src/config/lua/ConfigManager.hpp>
+#include <src/config/ConfigValue.hpp>
 #include <src/config/lua/types/LuaConfigString.hpp>
 #include <src/config/lua/types/LuaConfigInt.hpp>
 #include <src/config/lua/types/LuaConfigBool.hpp>
@@ -53,6 +58,7 @@
 #include "SpoilerPattern.hpp"
 #include "Appearance.hpp"
 #include "NativeConfig.hpp"
+#include "RenderAssets.hpp"
 
 namespace {
 using Frame = Screenshare::CScreenshareFrame;
@@ -139,6 +145,13 @@ std::string gImagePath;
 std::string gLoadedImagePath;
 std::string gImageStatus = "not-loaded";
 SP<Render::ITexture> gImage;
+SP<Render::IFramebuffer> gZoomScene;
+SP<Render::IFramebuffer> gTransformScene;
+std::string gMaskColor = "#000000", gImageFit = "stretch", gShaderPath, gIconPath;
+std::string gLoadedIconPath, gIconStatus = "not-loaded";
+SP<Render::ITexture> gCustomIcon;
+SP<CShader> gImageShader;
+bool gImageShaderAttempted = false;
 Hyprveil::Appearance gAppearance;
 bool gConfigReady = false;
 bool gInitialized = false;
@@ -154,6 +167,10 @@ SP<CShader> gSpoilerShader;
 constexpr std::array<std::string_view, 3> SPOILER_ICONS{"eye", "lock", "shield"};
 std::array<SP<Render::ITexture>, SPOILER_ICONS.size()> gSpoilerIcons;
 SP<Render::ITexture> spoilerIcon() {
+    if (gAppearance.icon == "custom") {
+        if (gCustomIcon && gCustomIcon->ok()) return gCustomIcon;
+        return gSpoilerIcons[0]; // recognizable content-free fallback
+    }
     for (std::size_t i = 0; i < SPOILER_ICONS.size(); ++i)
         if (SPOILER_ICONS[i] == gAppearance.icon) return gSpoilerIcons[i];
     return {};
@@ -223,7 +240,7 @@ constexpr std::uint32_t MAX_PNG_AXIS = Hyprveil::Png::MAX_AXIS;
 std::vector<unsigned char> readBoundedPng(const std::string& path) {
     // The path may have changed since the command checked it. O_NONBLOCK makes
     // a replacement FIFO harmless; fstat checks the actual opened object.
-    const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    const int fd = Hyprveil::Assets::openAsset(path);
     if (fd < 0)
         return {};
     Hyprutils::Utils::CScopeGuard closeFile([fd]() { close(fd); });
@@ -267,6 +284,33 @@ cairo_status_t readPngStream(void* closure, unsigned char* output, unsigned int 
     return CAIRO_STATUS_SUCCESS;
 }
 
+SP<Render::ITexture> uploadPng(Renderer* renderer, const std::string& path, std::string& status) {
+    const auto bytes = readBoundedPng(path);
+    if (bytes.empty()) { status = "invalid-png"; return {}; }
+    PngStream stream{bytes};
+    auto* image = cairo_image_surface_create_from_png_stream(readPngStream, &stream);
+    Hyprutils::Utils::CScopeGuard destroyImage([image]() { cairo_surface_destroy(image); });
+    auto* pixels = Hyprveil::Png::uploadPixels(image);
+    Hyprutils::Utils::CScopeGuard destroyPixels([pixels]() { if (pixels) cairo_surface_destroy(pixels); });
+    if (!pixels) { status = "invalid-png"; return {}; }
+    auto texture = renderer->createTexture(pixels);
+    if (!texture || !texture->ok()) { status = "texture-failed"; return {}; }
+    texture->m_imageDescription = NColorManagement::DEFAULT_SRGB_IMAGE_DESCRIPTION;
+    status = "ready";
+    return texture;
+}
+
+std::array<float, 3> maskTint() { return Hyprveil::Appearance{.color=gMaskColor}.tint(); }
+CHyprColor fillColor() {
+    const auto tint = maskTint();
+    return CHyprColor{tint[0], tint[1], tint[2], 1.F};
+}
+bool spoilerAnimated() {
+    if (gShaderPath.empty()) return gAppearance.animated();
+    return gAppearance.speed > 0 && gSpoilerShader &&
+        gSpoilerShader->getUniformLocation(SHADER_TIME) >= 0;
+}
+
 CFunctionHook* gMonitorHook = nullptr;
 CFunctionHook* gWindowHook = nullptr;
 CFunctionHook* gLayerHook = nullptr;
@@ -296,8 +340,10 @@ void animateCapture(PHLMONITOR monitor, const Time::steady_tp& now) {
 // Its objects are explicitly removed before plugin code/vtables can unload.
 class SatinPass final : public IPassElement {
   public:
-    SatinPass(CBox box, double scale, float time, SP<CShader> shader, Hyprveil::Appearance appearance)
-        : m_box(box), m_scale(scale), m_time(time), m_shader(std::move(shader)), m_appearance(std::move(appearance)) {}
+    SatinPass(CBox box, double scale, float time, SP<CShader> shader, Hyprveil::Appearance appearance, int rounding, float roundingPower,
+              std::array<float, 3> fill, SP<Render::ITexture> image = {}, int imageFit = 0)
+        : m_box(box), m_scale(scale), m_time(time), m_shader(std::move(shader)), m_appearance(std::move(appearance)),
+          m_rounding(rounding), m_roundingPower(roundingPower), m_fill(fill), m_image(std::move(image)), m_imageFit(imageFit) {}
     bool needsLiveBlur() override { return false; }
     bool needsPrecomputeBlur() override { return false; }
     const char* passName() override { return Hyprveil::Spoiler::PASS_NAME; }
@@ -320,12 +366,30 @@ class SatinPass final : public IPassElement {
         auto shader = gl->useShader(m_shader);
         shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, g_pHyprRenderer->projectBoxToTarget(box).getMatrix());
         shader->setUniformFloat2(SHADER_FULL_SIZE, box.w, box.h);
+        shader->setUniformFloat(SHADER_RADIUS, m_rounding * data.renderModif.combinedScale());
+        shader->setUniformFloat(SHADER_ROUNDING_POWER, m_roundingPower);
         shader->setUniformFloat(SHADER_TIME, m_time * m_appearance.speed / 100.F);
         const auto tint = m_appearance.tint();
         shader->setUniformFloat3(SHADER_TINT, tint[0], tint[1], tint[2]);
         shader->setUniformFloat(SHADER_NOISE, m_appearance.grain / 100.F);
         shader->setUniformFloat(SHADER_BRIGHTNESS, m_appearance.darkness / 100.F);
-        shader->setUniformInt(SHADER_TEX_TYPE, m_appearance.shaderVariant());
+        shader->setUniformInt(SHADER_TEX_TYPE, m_image ? m_imageFit : m_appearance.shaderVariant());
+        shader->setUniformFloat3(SHADER_COLOR, m_fill[0], m_fill[1], m_fill[2]);
+        GLint oldActive = GL_TEXTURE0, oldTexture = 0;
+        if (m_image) {
+            glGetIntegerv(GL_ACTIVE_TEXTURE, &oldActive);
+            glActiveTexture(GL_TEXTURE0);
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTexture);
+            glBindTexture(GL_TEXTURE_2D, m_image->m_texID);
+            shader->setUniformInt(SHADER_TEX, 0);
+            shader->setUniformFloat2(SHADER_UV_SIZE, m_image->m_size.x, m_image->m_size.y);
+        }
+        Hyprutils::Utils::CScopeGuard restoreTexture([&]() {
+            if (!m_image) return;
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, oldTexture);
+            glActiveTexture(oldActive);
+        });
         glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO));
         damage.forEachRect([&](const auto& rect) {
             gl->scissor(&rect, data.transformDamage);
@@ -342,9 +406,143 @@ class SatinPass final : public IPassElement {
     float m_time;
     SP<CShader> m_shader;
     Hyprveil::Appearance m_appearance;
+    int m_rounding;
+    float m_roundingPower;
+    std::array<float, 3> m_fill;
+    SP<Render::ITexture> m_image;
+    int m_imageFit;
 };
 
-SP<CShader> compileSpoilerShader(const char* fragment) {
+// Only the reviewed OmaFX 0.4 mesh transformer is input-only. Other native or
+// plugin transformers may retain original window snapshots, so they keep the
+// plain synthetic replacement. Identity is the exact exported vtable in the
+// loaded module, not a basename or a user-provided type string.
+bool reviewedPrivateTransformers(const PHLWINDOW& window) {
+    if (!window || window->m_transformers.empty() || !g_pPluginSystem) return false;
+    const CPlugin* plugin = nullptr;
+    for (const auto* candidate : g_pPluginSystem->getAllPlugins()) {
+        if (!candidate || candidate->m_name != "omarchy-fx" || candidate->m_version != "0.4.0") continue;
+        if (plugin) return false;
+        plugin = candidate;
+    }
+    if (!plugin || !plugin->m_handle) return false;
+    auto* vtable = dlsym(plugin->m_handle, "_ZTVN9OmarchyFX16CMeshTransformerE");
+    auto* init = dlsym(plugin->m_handle, PLUGIN_INIT_FUNC_STR);
+    Dl_info tableInfo{}, initInfo{};
+    if (!vtable || !init || !dladdr(vtable, &tableInfo) || !dladdr(init, &initInfo) ||
+        tableInfo.dli_fbase != initInfo.dli_fbase) return false;
+    // Reviewed GCC/Itanium ABI: address point follows offset-to-top and RTTI.
+    const void* addressPoint = static_cast<const char*>(vtable) + 2 * sizeof(void*);
+    return std::all_of(window->m_transformers.begin(), window->m_transformers.end(), [&](const auto& transformer) {
+        if (!transformer) return false;
+        const void* actual = nullptr;
+        std::memcpy(&actual, transformer.get(), sizeof(actual));
+        return actual == addressPoint;
+    });
+}
+
+// Native transformed-window recipe, with a dedicated, fully cleared mask-only
+// input and no blur/motion history. One reusable full-monitor FB bounds memory
+// independently of the number of private views. Draws execute serially in the
+// compositor GL context, so the next mask cannot overwrite a queued input.
+class PrivateTransformPass final : public IPassElement {
+  public:
+    PrivateTransformPass(UP<Render::CRenderPass> pass, PHLWINDOW window, CBox currentBox, Time::steady_tp when)
+        : m_pass(std::move(pass)), m_window(window), m_currentBox(currentBox), m_when(when) {}
+    bool needsLiveBlur() override { return false; }
+    bool needsPrecomputeBlur() override { return false; }
+    bool disableSimplification() override { return true; }
+    const char* passName() override { return Hyprveil::Spoiler::PASS_NAME; }
+    ePassElementType type() override { return EK_CUSTOM; }
+    // Deformation can extend beyond the original view. Never cull its output
+    // to the old window rectangle; damage is bounded by the capture target.
+    std::optional<CBox> boundingBox() override { return {}; }
+    CRegion opaqueRegion() override { return {}; }
+    std::vector<UP<IPassElement>> draw() override {
+        auto* renderer = g_pHyprRenderer.get();
+        if (!renderer || !m_pass) return {};
+        const auto window = m_window.lock();
+        const auto saved = renderer->m_renderData;
+        const auto monitor = saved.pMonitor.lock();
+        const auto restoreTarget = [&]() {
+            renderer->m_renderData = saved;
+            renderer->bindFB(saved.currentFB);
+            renderer->setViewport(0, 0, saved.fbSize.x, saved.fbSize.y);
+        };
+        Hyprutils::Utils::CScopeGuard restoreAll(restoreTarget);
+        const auto fallback = [&]() { restoreTarget(); m_pass->render(saved.damage); };
+        if (!monitor || !reviewedPrivateTransformers(window)) { fallback(); return {}; }
+        SP<Render::IFramebuffer> output;
+        // An unused native work FB can still carry the local mirror texture
+        // as COLOR_ATTACHMENT1. Keep it referenced throughout the chain so
+        // OmaFX's strongRef-based pool selection cannot clear that attachment.
+        // Do not detach or rewrite any native cache to obtain a work target.
+        std::vector<SP<Render::IFramebuffer>> mirroredWorkBuffers;
+        try {
+            monitor->resources()->forEachUnusedFB([&](const auto& fb) {
+                if (fb->getMirrorTexture()) mirroredWorkBuffers.push_back(fb);
+            });
+            if (!gTransformScene) gTransformScene = renderer->createFB("hyprveil sanitized transformer input");
+            if (!gTransformScene || !gTransformScene->alloc(monitor->m_pixelSize.x, monitor->m_pixelSize.y, DRM_FORMAT_ABGR8888)) {
+                fallback(); return {};
+            }
+            gTransformScene->setImageDescription(renderer->workBufferImageDescription());
+            {
+                Hyprutils::Utils::CScopeGuard restore([&]() {
+                    renderer->m_renderData = saved;
+                    renderer->bindFB(saved.currentFB);
+                    renderer->setViewport(0, 0, saved.fbSize.x, saved.fbSize.y);
+                });
+                renderer->bindFB(gTransformScene);
+                auto& data = renderer->m_renderData;
+                data.mainFB = gTransformScene;
+                data.fbSize = monitor->m_pixelSize;
+                data.damage = CRegion{0, 0, data.fbSize.x, data.fbSize.y};
+                data.finalDamage = data.damage;
+                data.renderModif = {};
+                data.currentWindow = window;
+                data.surface.reset();
+                data.clipBox = {};
+                data.useNearestNeighbor = false;
+                renderer->setProjectionType(Render::RPT_EXPORT);
+                renderer->setViewport(0, 0, data.fbSize.x, data.fbSize.y);
+                renderer->draw(CClearPassElement::SClearData{CHyprColor{0, 0, 0, 0}}, data.damage);
+                m_pass->render(data.damage);
+                // No wl_surface, texture, decorations or window render events
+                // enter this descriptor. OmaFX only resets its geometry latch.
+                CSurfacePassElement::SRenderData synthetic{monitor, m_when};
+                synthetic.pos = window->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+                synthetic.w = window->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT).x;
+                synthetic.h = window->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT).y;
+                SMotionBlurData disabledMotion;
+                output = gTransformScene;
+                for (const auto& transformer : window->m_transformers) {
+                    transformer->preWindowRender(&synthetic);
+                    transformer->amendTransformedRenderData(m_currentBox, &disabledMotion);
+                    output = transformer->transform(output);
+                    if (!output || !output->getTexture() || !output->getTexture()->ok()) break;
+                }
+            }
+        } catch (...) {
+            output.reset();
+        }
+        if (!output || !output->getTexture() || !output->getTexture()->ok()) {
+            fallback(); return {};
+        }
+        // The original region modifier is restored here and applies exactly
+        // once. Native zoom, when active, wraps the whole sanitized scene later.
+        renderer->draw(CTexPassElement::SRenderData{
+            .tex = output->getTexture(), .box = CBox{{}, monitor->m_pixelSize}}, saved.damage);
+        return {};
+    }
+  private:
+    UP<Render::CRenderPass> m_pass;
+    PHLWINDOWREF m_window;
+    CBox m_currentBox;
+    Time::steady_tp m_when;
+};
+
+SP<CShader> compileSpoilerShader(const char* fragment, bool strictBuiltIn = true, bool procedural = false) {
     // Native static compilation asserts and dynamic compilation leaks stage
     // objects on early rejection in this ABI. Own every GL allocation until
     // a fully checked program/VAO/VBO can transfer to the native destructor.
@@ -391,10 +589,30 @@ SP<CShader> compileSpoilerShader(const char* fragment) {
     locations[SHADER_TINT] = glGetUniformLocation(program, "tint");
     locations[SHADER_NOISE] = glGetUniformLocation(program, "grainAmount");
     locations[SHADER_BRIGHTNESS] = glGetUniformLocation(program, "darkness");
-    locations[SHADER_TEX_TYPE] = glGetUniformLocation(program, "variant");
-    if (locations[SHADER_PROJ] < 0 || locations[SHADER_FULL_SIZE] < 0 || locations[SHADER_TIME] < 0 ||
-        locations[SHADER_POS_ATTRIB] < 0 || locations[SHADER_TEX_ATTRIB] < 0 ||
-        locations[SHADER_TINT] < 0 || locations[SHADER_NOISE] < 0 || locations[SHADER_BRIGHTNESS] < 0 || locations[SHADER_TEX_TYPE] < 0)
+    locations[SHADER_TEX_TYPE] = glGetUniformLocation(program, strictBuiltIn ? "variant" : procedural ? "variant" : "imageFit");
+    locations[SHADER_RADIUS] = glGetUniformLocation(program, "radius");
+    locations[SHADER_ROUNDING_POWER] = glGetUniformLocation(program, "roundingPower");
+    locations[SHADER_COLOR] = glGetUniformLocation(program, "maskColor");
+    locations[SHADER_TEX] = glGetUniformLocation(program, "maskImage");
+    locations[SHADER_UV_SIZE] = glGetUniformLocation(program, "imageSize");
+    if (procedural) {
+        GLint uniforms = 0;
+        glGetProgramiv(program, GL_ACTIVE_UNIFORMS, &uniforms);
+        for (GLint index = 0; index < uniforms; ++index) {
+            std::array<char, 128> name{};
+            GLint size = 0; GLenum type = 0; GLsizei length = 0;
+            glGetActiveUniform(program, index, name.size(), &length, &size, &type, name.data());
+            // Defense in depth behind the no-resource source wrapper: a
+            // procedural program must never acquire an inherited sampler.
+            const bool projection = type == GL_FLOAT_MAT3 && std::string_view{name.data()} == "proj";
+            if (size != 1 || (!projection && type != GL_FLOAT && type != GL_FLOAT_VEC2 && type != GL_FLOAT_VEC3 && type != GL_FLOAT_VEC4 && type != GL_INT))
+                return {};
+        }
+    }
+    if (locations[SHADER_PROJ] < 0 || locations[SHADER_POS_ATTRIB] < 0 || locations[SHADER_TEX_ATTRIB] < 0)
+        return {};
+    if (strictBuiltIn && (locations[SHADER_FULL_SIZE] < 0 || locations[SHADER_TIME] < 0 ||
+        locations[SHADER_TINT] < 0 || locations[SHADER_NOISE] < 0 || locations[SHADER_BRIGHTNESS] < 0 || locations[SHADER_TEX_TYPE] < 0))
         return {};
     glGenVertexArrays(1, &vao);
     glGenBuffers(1, &vbo);
@@ -419,42 +637,52 @@ SP<CShader> compileSpoilerShader(const char* fragment) {
 }
 
 void prepareSpoiler(Renderer* renderer) {
-    if (gSpoilerStatus == "black-fallback")
-        return; // latch rejection for this plugin lifetime; never retry per frame
-    if (gSpoilerShader && gSpoilerShader->program() &&
-        std::all_of(gSpoilerIcons.begin(), gSpoilerIcons.end(), [](const auto& texture) { return texture && texture->ok(); }))
-        return;
+    if (gSpoilerStatus == "black-fallback" || gSpoilerStatus == "color-fallback")
+        return; // retry only after an explicit shader selection/reload
+    if (gSpoilerShader && gSpoilerShader->program()) return;
     try {
         if (renderer->type() != Renderer::RT_GL || !Render::GL::g_pHyprOpenGL)
             throw std::runtime_error("synthetic shader requires GL");
         ++gSpoilerShaderAttempts;
+        std::string custom;
         const char* fragment = Hyprveil::Spoiler::FRAGMENT;
+        if (!gShaderPath.empty()) {
+            auto source = Hyprveil::Assets::readShader(gShaderPath);
+            if (!source) throw std::runtime_error(source.error());
+            auto wrapped = Hyprveil::Assets::wrapShader(*source);
+            if (!wrapped) throw std::runtime_error(wrapped.error());
+            custom = std::move(*wrapped);
+            fragment = custom.c_str();
+        }
         const auto* fault = std::getenv("HYPRVEIL_LAB_SPOILER_SHADER_FAILURE");
         if (!gLiveSession && fault && std::string{fault} == "1")
             fragment = "#version 300 es\ninvalid synthetic lab shader\n";
-        auto shader = compileSpoilerShader(fragment);
-        if (!shader)
-            throw std::runtime_error("synthetic shader unavailable");
-        decltype(gSpoilerIcons) icons;
+        auto shader = compileSpoilerShader(fragment, gShaderPath.empty(), !gShaderPath.empty());
+        if (!shader) throw std::runtime_error("synthetic shader unavailable");
         for (std::size_t i = 0; i < SPOILER_ICONS.size(); ++i) {
+            if (gSpoilerIcons[i] && gSpoilerIcons[i]->ok()) continue;
             auto* pixels = Hyprveil::Spoiler::icon(SPOILER_ICONS[i]);
-            if (!pixels)
-                throw std::runtime_error("synthetic icon unavailable");
+            if (!pixels) throw std::runtime_error("synthetic icon unavailable");
             Hyprutils::Utils::CScopeGuard destroyPixels([pixels]() { cairo_surface_destroy(pixels); });
             auto texture = renderer->createTexture(pixels);
-            if (!texture || !texture->ok())
-                throw std::runtime_error("synthetic icon texture unavailable");
+            if (!texture || !texture->ok()) throw std::runtime_error("synthetic icon texture unavailable");
             texture->m_imageDescription = NColorManagement::DEFAULT_SRGB_IMAGE_DESCRIPTION;
-            icons[i] = std::move(texture);
+            gSpoilerIcons[i] = std::move(texture);
         }
         gSpoilerShader = std::move(shader);
-        gSpoilerIcons = std::move(icons);
-        gSpoilerStatus = "ready";
+        gSpoilerStatus = gShaderPath.empty() ? "ready" : "custom-ready";
     } catch (...) {
         gSpoilerShader.reset();
-        for (auto& icon : gSpoilerIcons) icon.reset();
-        gSpoilerStatus = "black-fallback";
+        gSpoilerStatus = gShaderPath.empty() ? "black-fallback" : "color-fallback";
     }
+}
+
+void prepareCustomIcon(Renderer* renderer) {
+    if (gAppearance.icon != "custom" || gLoadedIconPath == gIconPath) return;
+    gLoadedIconPath = gIconPath;
+    gCustomIcon.reset();
+    try { gCustomIcon = uploadPng(renderer, gIconPath, gIconStatus); }
+    catch (...) { gIconStatus = "texture-failed"; }
 }
 
 void requireLab() {
@@ -867,37 +1095,66 @@ bool resetSharingChoices() noexcept {
 void windowHook(Renderer* self, PHLWINDOW window, PHLMONITOR monitor, const Time::steady_tp& now,
                 bool decorate, Render::eRenderPassMode mode, bool ignorePosition, bool standalone) {
     if (gCaptureScene && privateWindow(window)) {
+        // Match native renderWindow admission before replacing a view. In
+        // particular, a fully faded/hidden view must not acquire a fresh opaque
+        // rectangle above the fullscreen scene that already occluded it.
+        if (!window->m_isMapped || (!standalone && (window->isHidden() ||
+            (window->effectiveAlpha() == 0.F && !window->alpha().isBeingAnimated()))))
+            return;
         ++gOmittedWindowPasses;
-        if ((gMode == "image" || gMode == "black" || gMode == "spoiler") && mode != Render::RENDER_PASS_POPUP) {
+        if ((gMode == "image" || gMode == "black" || gMode == "color" || gMode == "spoiler") && mode != Render::RENDER_PASS_POPUP) {
             // Insert the replacement at this window's normal stack position.
             // Do not draw the original surface; image alpha reveals only the
             // already sanitized background. Popups remain omitted separately.
             const auto offset = window->m_workspace && !window->m_pinned ? window->m_workspace->m_renderOffset->value() : Vector2D{};
-            auto box = CBox{window->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT) + offset + window->m_floatingOffset - monitor->m_position,
-                            window->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT)}.scale(monitor->m_scale);
+            const auto position = ignorePosition ? monitor->m_position : window->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT) + offset;
+            const auto size = window->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+            auto box = CBox{position + window->m_floatingOffset - monitor->m_position,
+                            Vector2D{std::max(size.x, 5.0), std::max(size.y, 5.0)}}.scale(monitor->m_scale);
+            const bool square = standalone || Fullscreen::controller()->getFullscreenModes(window).internal == Fullscreen::FSMODE_FULLSCREEN;
+            const int rounding = square ? 0 : window->rounding() * monitor->m_scale;
+            const float roundingPower = square ? 2.F : window->roundingPower();
+            UP<Render::CRenderPass> transformedMask;
+            UP<Render::CScopeGuard> redirectMask;
+            if (reviewedPrivateTransformers(window)) {
+                transformedMask = makeUnique<Render::CRenderPass>();
+                redirectMask = self->redirectPass(transformedMask.get());
+            }
             if (gMode == "spoiler") {
                 prepareSpoiler(self);
+                prepareCustomIcon(self);
                 // Always opaque underlay. A failed allocation/upload never
                 // delegates to the original window or cached local pixels.
-                self->m_renderPass.add(makeUnique<CRectPassElement>(CRectPassElement::SRectData{.box = box, .color = Colors::BLACK}));
+                self->addPassElement(makeUnique<CRectPassElement>(CRectPassElement::SRectData{.box = box, .color = gShaderPath.empty() ? Colors::BLACK : fillColor(), .round = rounding, .roundingPower = roundingPower}));
                 if (gSpoilerShader && gSpoilerShader->program()) {
-                    if (gAppearance.animated())
+                    if (spoilerAnimated())
                         animateCapture(monitor, now);
                     const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-                    self->m_renderPass.add(makeUnique<SatinPass>(box, monitor->m_scale,
-                        Hyprveil::Spoiler::seconds(static_cast<std::uint64_t>(milliseconds)), gSpoilerShader, gAppearance));
+                    self->addPassElement(makeUnique<SatinPass>(box, monitor->m_scale,
+                        Hyprveil::Spoiler::seconds(static_cast<std::uint64_t>(milliseconds)), gSpoilerShader, gAppearance, rounding, roundingPower, maskTint()));
                     const double side = std::min({static_cast<double>(gAppearance.eyeSize) * monitor->m_scale, box.w * 0.72, box.h * 0.72});
                     const auto icon = spoilerIcon();
                     if (gAppearance.eye && gAppearance.iconOpacity > 0 && side >= 12 && icon && icon->ok()) {
-                        const CBox iconBox{box.pos() + (box.size() - Vector2D{side, side}) / 2.0, Vector2D{side, side}};
-                        self->m_renderPass.add(makeUnique<CTexPassElement>(CTexPassElement::SRenderData{
+                        const double ratio = std::min(side / std::max(icon->m_size.x, 1.0), side / std::max(icon->m_size.y, 1.0));
+                        const Vector2D iconSize = icon->m_size * ratio;
+                        const CBox iconBox{box.pos() + (box.size() - iconSize) / 2.0, iconSize};
+                        self->addPassElement(makeUnique<CTexPassElement>(CTexPassElement::SRenderData{
                             .tex = icon, .box = iconBox, .a = gAppearance.iconOpacity / 100.F}));
                     }
                 }
-            } else if (gMode == "image" && gImage && gImage->ok())
-                self->m_renderPass.add(makeUnique<CTexPassElement>(CTexPassElement::SRenderData{.tex = gImage, .box = box}));
-            else
-                self->m_renderPass.add(makeUnique<CRectPassElement>(CRectPassElement::SRectData{.box = box, .color = Colors::BLACK}));
+            } else {
+                self->addPassElement(makeUnique<CRectPassElement>(CRectPassElement::SRectData{
+                    .box = box, .color = gMode == "black" ? Colors::BLACK : fillColor(), .round = rounding, .roundingPower = roundingPower}));
+                if (gMode == "image" && gImage && gImage->ok() && gImageShader && gImageShader->program())
+                    self->addPassElement(makeUnique<SatinPass>(box, monitor->m_scale, 0.F, gImageShader,
+                        gAppearance, rounding, roundingPower, maskTint(), gImage, Hyprveil::Assets::imageFit(gImageFit)));
+            }
+            if (transformedMask) {
+                redirectMask.reset();
+                auto currentBox = window->getFullWindowBoundingBox();
+                currentBox.translate(offset + window->m_floatingOffset - monitor->m_position);
+                self->addPassElement(makeUnique<PrivateTransformPass>(std::move(transformedMask), window, currentBox, now));
+            }
         }
         return;
     }
@@ -991,42 +1248,41 @@ void monitorHook(Frame* frame) {
     if (gMode == "image" && gLoadedImagePath != gImagePath) {
         gImage.reset();
         gLoadedImagePath = gImagePath;
-        try {
-            const auto bytes = readBoundedPng(gImagePath);
-            if (bytes.empty()) {
-                gImageStatus = "invalid-png";
-            } else {
-                PngStream stream{bytes};
-                auto* image = cairo_image_surface_create_from_png_stream(readPngStream, &stream);
-                Hyprutils::Utils::CScopeGuard destroyImage([image]() { cairo_surface_destroy(image); });
-                const int width = cairo_image_surface_get_width(image);
-                const int height = cairo_image_surface_get_height(image);
-                if (cairo_surface_status(image) != CAIRO_STATUS_SUCCESS || width <= 0 || height <= 0 ||
-                    width > static_cast<int>(MAX_PNG_AXIS) || height > static_cast<int>(MAX_PNG_AXIS) ||
-                    static_cast<std::uint64_t>(width) * height > MAX_PNG_PIXELS) {
-                    gImageStatus = "invalid-png";
-                } else {
-                    // loadAsset() resolves packaged asset names, not arbitrary
-                    // paths. Upload the bounded decoded snapshot only in the
-                    // active capture GL context; failure remains a black mask.
-                    auto* pixels = Hyprveil::Png::uploadPixels(image);
-                    Hyprutils::Utils::CScopeGuard destroyPixels([pixels]() { if (pixels) cairo_surface_destroy(pixels); });
-                    if (pixels)
-                        gImage = renderer->createTexture(pixels);
-                    if (gImage && gImage->ok()) {
-                        gImage->m_imageDescription = NColorManagement::DEFAULT_SRGB_IMAGE_DESCRIPTION;
-                        gImageStatus = "ready";
-                    } else {
-                        gImage.reset();
-                        gImageStatus = "texture-failed";
-                    }
-                }
-            }
-        } catch (...) {
-            // Resource failure must not fall back to the real window surface.
-            gImage.reset();
-            gImageStatus = "texture-failed";
+        try { gImage = uploadPng(renderer, gImagePath, gImageStatus); }
+        catch (...) { gImageStatus = "texture-failed"; }
+    }
+    if (gMode == "image" && !gImageShaderAttempted) {
+        gImageShaderAttempted = true;
+        try { gImageShader = compileSpoilerShader(Hyprveil::Assets::IMAGE_FRAGMENT, false); }
+        catch (...) { gImageShader.reset(); }
+        if (!gImageShader) gImageStatus = "shader-failed";
+    }
+
+    CBox zoomBox = sceneBox;
+    auto& renderData = renderer->m_renderData;
+    renderData.mouseZoomFactor = 1.F;
+    renderData.mouseZoomUseMouse = true;
+    const float zoom = monitor->m_cursorZoom->value();
+    if (zoom != 1.F && monitor == State::monitorState()->query().vec(Pointer::mgr()->position()).run())
+        renderData.mouseZoomFactor = std::clamp(zoom, 1.F, INFINITY);
+    if (monitor->m_zoomAnimProgress->value() != 1.F) {
+        renderData.mouseZoomFactor = 2.F - monitor->m_zoomAnimProgress->value();
+        renderData.mouseZoomUseMouse = false;
+    }
+    auto camera = monitor->m_zoomController;
+    camera.applyZoomTransform(zoomBox, renderData);
+    // Native endRender must not zoom again: the sanitized full-monitor texture
+    // is transformed below, before the physical capture region is selected.
+    renderData.mouseZoomFactor = 1.F;
+    const bool zoomed = zoomBox != sceneBox;
+    if (zoomed) {
+        if (!gZoomScene) gZoomScene = renderer->createFB("hyprveil sanitized zoom scene");
+        if (!gZoomScene || !gZoomScene->alloc(sceneBox.w, sceneBox.h, DRM_FORMAT_ABGR8888)) {
+            opaqueCapture(frame);
+            ++gFallbackFrames;
+            return;
         }
+        gZoomScene->setImageDescription(renderer->workBufferImageDescription());
     }
 
     renderer->m_renderData.fbSize = size;
@@ -1045,12 +1301,32 @@ void monitorHook(Frame* frame) {
         renderer->m_bBlockSurfaceFeedback = oldFeedback;
     });
 
-    // Region coordinates were already scaled to physical pixels by Session.
-    // Shift scene elements only; window geometry and workspace stay untouched.
-    if (captureBox.pos() != Vector2D{}) {
+    const auto savedData = renderer->m_renderData;
+    bool redirected = false;
+    Hyprutils::Utils::CScopeGuard restoreZoom([&]() {
+        if (!redirected) return;
+        renderer->m_renderData = savedData;
+        renderer->bindFB(savedData.currentFB);
+        renderer->setViewport(0, 0, size.x, size.y);
+    });
+    if (zoomed) {
+        redirected = true;
+        renderer->bindFB(gZoomScene);
+        renderer->m_renderData.mainFB = gZoomScene;
+        renderer->m_renderData.fbSize = sceneBox.size();
+        renderer->m_renderData.damage = CRegion{sceneBox};
+        renderer->m_renderData.finalDamage = CRegion{sceneBox};
+        renderer->m_renderData.renderModif = {};
+        renderer->setProjectionType(Render::RPT_EXPORT);
+        renderer->setViewport(0, 0, sceneBox.w, sceneBox.h);
+        renderer->draw(CClearPassElement::SClearData{Colors::BLACK}, CRegion{sceneBox});
+    }
+    // Region coordinates are physical pixels. Crop after camera zoom, so
+    // regional capture is the same rectangle of the final monitor image.
+    if (!zoomed && captureBox.pos() != Vector2D{}) {
         Render::SRenderModifData modifs;
         modifs.modifs.emplace_back(Render::SRenderModifData::RMOD_TYPE_TRANSLATE, -captureBox.pos());
-        renderer->m_renderPass.add(makeUnique<CRendererHintsPassElement>(CRendererHintsPassElement::SData{modifs}));
+        renderer->addPassElement(makeUnique<CRendererHintsPassElement>(CRendererHintsPassElement::SData{modifs}));
     }
 
     (renderer->*member(RenderWorkspace{}))(monitor, monitor->m_activeWorkspace, now, sceneBox);
@@ -1058,17 +1334,32 @@ void monitorHook(Frame* frame) {
     // Locked captures were denied above without rendering any local lock view.
     // IME intentionally omitted: its source can be a protected window.
 
-    if (captureBox.pos() != Vector2D{})
-        renderer->m_renderPass.add(makeUnique<CRendererHintsPassElement>(CRendererHintsPassElement::SData{Render::SRenderModifData{}}));
+    if (!zoomed && captureBox.pos() != Vector2D{})
+        renderer->addPassElement(makeUnique<CRendererHintsPassElement>(CRendererHintsPassElement::SData{Render::SRenderModifData{}}));
 
     if (overlayCursor) {
-        CRegion damage{0, 0, size.x, size.y};
-        const auto cursor = g_pInputManager->getMouseCoordsInternal() - monitor->m_position - captureBox.pos() / monitor->m_scale;
+        CRegion damage{0, 0, zoomed ? sceneBox.w : size.x, zoomed ? sceneBox.h : size.y};
+        const auto cursor = g_pInputManager->getMouseCoordsInternal() - monitor->m_position -
+            (zoomed ? Vector2D{} : captureBox.pos() / monitor->m_scale);
         // Native monitor capture reuses a mirror that already contains any
         // software cursor, and normally skips drawing it twice. Our rebuilt
         // scene has no such cursor, so force it exactly once when requested.
         Pointer::mgr()->renderSoftwareCursorsFor(monitor, now, damage, cursor, true, true);
     }
+    if (zoomed) {
+        renderer->m_renderPass.render(CRegion{sceneBox});
+        renderer->m_renderPass.clear();
+        renderer->m_renderData = savedData;
+        renderer->bindFB(savedData.currentFB);
+        renderer->setViewport(0, 0, size.x, size.y);
+        redirected = false;
+        static auto disableZoomAA = CConfigValue<Config::INTEGER>("cursor:zoom_disable_aa");
+        renderer->m_renderData.useNearestNeighbor = savedData.mouseZoomUseMouse && *disableZoomAA;
+        renderer->addPassElement(makeUnique<CTexPassElement>(CTexPassElement::SRenderData{
+            .tex = gZoomScene->getTexture(), .box = zoomBox.translate(-captureBox.pos()), .flipEndFrame = true}));
+    }
+    // Do not emit RENDER_LAST_MOMENT for arbitrary third-party callbacks here:
+    // plugins can read native monitor caches containing unsanitized pixels.
     ++gSceneFrames;
 }
 
@@ -1131,6 +1422,7 @@ class NativeString final : public Config::Lua::CLuaConfigString {
         // Store canonical color and legacy variant aliases in the same
         // value read by hl.get_config/getoption and status.
         const auto* canonical = m_field == "color" ? &checked.appearance.color :
+            m_field == "mask_color" ? &checked.maskColor :
             m_field == "variant" ? &checked.appearance.variant : nullptr;
         if (canonical) lua_pushlstring(state, canonical->data(), canonical->size());
         const auto parsed = CLuaConfigString::parse(state);
@@ -1214,6 +1506,10 @@ NativeSettings readNativeConfiguration() {
     NativeSettings result;
     result.mode = nativeValue("mode")->asString();
     result.imagePath = nativeValue("image_path")->asString();
+    result.maskColor = nativeValue("mask_color")->asString();
+    result.imageFit = nativeValue("image_fit")->asString();
+    result.shaderPath = nativeValue("shader_path")->asString();
+    result.iconPath = nativeValue("icon_path")->asString();
     result.appearance.variant = nativeValue("variant")->asString();
     result.appearance.color = nativeValue("color")->asString();
     result.appearance.grain = nativeValue("grain")->asInt();
@@ -1228,16 +1524,26 @@ NativeSettings readNativeConfiguration() {
 
 void syncNativeConfiguration() {
     const auto settings = readNativeConfiguration();
-    const bool changed = gMode != settings.mode || gImagePath != settings.imagePath || gAppearance != settings.appearance || !gEnabled;
+    const bool changed = gMode != settings.mode || gImagePath != settings.imagePath || gAppearance != settings.appearance ||
+        gMaskColor != settings.maskColor || gImageFit != settings.imageFit || gShaderPath != settings.shaderPath || gIconPath != settings.iconPath || !gEnabled;
+    if (gShaderPath != settings.shaderPath) {
+        gSpoilerShader.reset();
+        gSpoilerStatus = "pending";
+    }
+    if (gIconPath != settings.iconPath) { gLoadedIconPath.clear(); gCustomIcon.reset(); gIconStatus = "pending"; }
     if (gImagePath != settings.imagePath) {
         gLoadedImagePath.clear();
         gImageStatus = "pending";
     }
     gMode = settings.mode;
     gImagePath = settings.imagePath;
+    gMaskColor = settings.maskColor;
+    gImageFit = settings.imageFit;
+    gShaderPath = settings.shaderPath;
+    gIconPath = settings.iconPath;
     gAppearance = settings.appearance;
     gEnabled = true;
-    if (gMode != "spoiler" || !gAppearance.animated()) {
+    if (gMode != "spoiler" || !spoilerAnimated()) {
         gAnimatedCaptures.clear();
         if (gSpoilerTimer) gSpoilerTimer->updateTimeout(std::nullopt);
     }
@@ -1269,7 +1575,9 @@ std::expected<void, std::string> updateNativeConfiguration(const NativePatch& pa
         }
     }
     syncNativeConfiguration();
-    if (reloadImage) {
+    if (patch.contains("shader_path")) { gSpoilerShader.reset(); gSpoilerStatus = "pending"; capturePolicyChanged(); }
+    if (patch.contains("icon_path")) { gLoadedIconPath.clear(); gCustomIcon.reset(); gIconStatus = "pending"; capturePolicyChanged(); }
+    if (reloadImage || patch.contains("image_path")) {
         gLoadedImagePath.clear();
         gImageStatus = "pending";
         capturePolicyChanged();
@@ -1282,9 +1590,14 @@ void pushNativeStatus(lua_State* state) {
     lua_pushinteger(state, 1); lua_setfield(state, -2, "config_api");
     lua_pushlstring(state, gMode.data(), gMode.size()); lua_setfield(state, -2, "mode");
     lua_pushlstring(state, gImagePath.data(), gImagePath.size()); lua_setfield(state, -2, "image_path");
+    for (const auto& [field, text] : std::array<std::pair<const char*, const std::string*>, 4>{{
+        {"mask_color", &gMaskColor}, {"image_fit", &gImageFit}, {"shader_path", &gShaderPath}, {"icon_path", &gIconPath}}}) {
+        lua_pushlstring(state, text->data(), text->size()); lua_setfield(state, -2, field);
+    }
     lua_createtable(state, 0, 7);
     for (const auto& [field, value] : NativeSettings{.appearance=gAppearance}.values()) {
-        if (field == "mode" || field == "image_path" || field == "icon" || field == "icon_opacity") continue;
+        if (field == "mode" || field == "image_path" || field == "icon" || field == "icon_opacity" ||
+            field == "mask_color" || field == "image_fit" || field == "shader_path" || field == "icon_path") continue;
         pushNativeValue(state, value); lua_setfield(state, -2, field.c_str());
     }
     lua_setfield(state, -2, "appearance");
@@ -1319,7 +1632,7 @@ int luaNativeConfigure(lua_State* state) {
         lua_pushnil(state);
         while (lua_next(state, 1) != 0) {
             if (patch.size() >= Hyprveil::NativeConfig::FIELDS.size() || lua_type(state, -2) != LUA_TSTRING)
-                return fail("hyprveil.configure requires at most eleven string keys");
+                return fail("hyprveil.configure requires at most fifteen string keys");
             std::size_t size = 0;
             const char* bytes = lua_tolstring(state, -2, &size);
             if (size > 16) return fail("unknown Hyprveil setting");
@@ -1358,7 +1671,7 @@ int luaNativeDispatcher(lua_State* state, bool cycle) {
                 return fail("hyprveil.mode expects one mode string");
             std::size_t size = 0;
             const auto* bytes = lua_tolstring(state, 1, &size);
-            if (size > 7) return fail("mode must be black, omit, spoiler or image");
+            if (size > 7) return fail("mode must be black, color, omit, spoiler or image");
             argument.assign(bytes, size);
         }
         if (!g_pKeybindManager) return fail("native dispatcher manager unavailable");
@@ -1509,10 +1822,13 @@ int luaResetSharing(lua_State* state) {
 void registerNativeConfiguration() {
     const auto manager = Config::Lua::mgr();
     if (!manager) throw std::runtime_error("hyprveil: this configuration API requires Lua Hyprland");
-    constexpr std::array<const char*, 11> names{"plugin:hyprveil:mode", "plugin:hyprveil:image_path", "plugin:hyprveil:variant",
-        "plugin:hyprveil:color", "plugin:hyprveil:grain", "plugin:hyprveil:speed", "plugin:hyprveil:darkness",
-        "plugin:hyprveil:eye", "plugin:hyprveil:eye_size", "plugin:hyprveil:icon", "plugin:hyprveil:icon_opacity"};
-    static_assert(names.size() == Hyprveil::NativeConfig::FIELDS.size());
+    // IValue retains each const char*, so registration names must outlive it.
+    static const auto names = [] {
+        std::array<std::string, Hyprveil::NativeConfig::FIELDS.size()> result;
+        for (std::size_t index = 0; index < result.size(); ++index)
+            result[index] = "plugin:hyprveil:" + std::string{Hyprveil::NativeConfig::FIELDS[index]};
+        return result;
+    }();
     const auto defaults = NativeSettings{}.values();
     for (const auto* field : Hyprveil::NativeConfig::FIELDS)
         if (manager->m_configValues.contains("plugin.hyprveil." + std::string{field}))
@@ -1523,16 +1839,16 @@ void registerNativeConfiguration() {
         SP<Config::Values::IValue> generic;
         UP<Config::Lua::ILuaConfigValue> strict;
         if (const auto* text = std::get_if<std::string>(&value)) {
-            generic = makeShared<Config::Values::CStringValue>(names[index], "Hyprveil capture replacement setting", *text);
+            generic = makeShared<Config::Values::CStringValue>(names[index].c_str(), "Hyprveil capture replacement setting", *text);
             strict = makeUnique<NativeString>(field, *text);
         } else if (const auto* number = std::get_if<std::int64_t>(&value)) {
             const int minimum = std::string_view{field} == "eye_size" ? 40 : 0;
             const int maximum = std::string_view{field} == "eye_size" ? 128 : std::string_view{field} == "speed" ? 200 : 100;
-            generic = makeShared<Config::Values::CIntValue>(names[index], "Hyprveil capture replacement setting", *number,
+            generic = makeShared<Config::Values::CIntValue>(names[index].c_str(), "Hyprveil capture replacement setting", *number,
                 Config::Values::SIntValueOptions{.min=minimum, .max=maximum});
             strict = makeUnique<NativeInt>(*number, minimum, maximum);
         } else {
-            generic = makeShared<Config::Values::CBoolValue>(names[index], "Hyprveil capture replacement setting", std::get<bool>(value));
+            generic = makeShared<Config::Values::CBoolValue>(names[index].c_str(), "Hyprveil capture replacement setting", std::get<bool>(value));
             strict = makeUnique<NativeBool>(std::get<bool>(value));
         }
         if (!HyprlandAPI::addConfigValueV2(gHandle, generic))
@@ -1622,7 +1938,13 @@ void cleanup() {
     gSessionPolicies.clear();
     gOrphanPrivacy.clear();
     gParentDiagnostics.clear();
+    if (Render::GL::g_pHyprOpenGL)
+        Render::GL::g_pHyprOpenGL->makeEGLCurrent();
     gImage.reset();
+    gZoomScene.reset();
+    gTransformScene.reset();
+    gCustomIcon.reset();
+    gLoadedIconPath.clear();
     // A rendered pass can retain custom objects until the next clear().
     // Destroy plugin vtables while this DSO is still mapped.
     if (gSpoilerShader && Render::GL::g_pHyprOpenGL)
@@ -1630,6 +1952,8 @@ void cleanup() {
     if (g_pHyprRenderer)
         g_pHyprRenderer->m_renderPass.removeAllOfType(Hyprveil::Spoiler::PASS_NAME);
     gSpoilerShader.reset();
+    gImageShader.reset();
+    gImageShaderAttempted = false;
     for (auto& icon : gSpoilerIcons) icon.reset();
     gLoadedImagePath.clear();
     if (gCommand) {
@@ -1746,6 +2070,9 @@ std::string command(eHyprCtlOutputFormat, std::string request) {
     else if (request == "hyprveil on" || request == "hyprveil omit") {
         updated = updateNativeConfiguration({{"mode", std::string{"omit"}}});
     }
+    else if (request == "hyprveil color") {
+        updated = updateNativeConfiguration({{"mode", std::string{"color"}}});
+    }
     else if (request == "hyprveil spoiler") {
         updated = updateNativeConfiguration({{"mode", std::string{"spoiler"}}});
     }
@@ -1757,6 +2084,7 @@ std::string command(eHyprCtlOutputFormat, std::string request) {
         auto patch = NativeSettings{.appearance=*value}.values();
         patch.erase("mode");
         patch.erase("image_path");
+        for (const auto* key : {"mask_color", "image_fit", "shader_path", "icon_path"}) patch.erase(key);
         // Older callers know only the original seven appearance fields.
         // Preserve a separately selected shape and opacity on those updates.
         if (std::count(fields.begin(), fields.end(), ' ') == 6) {
@@ -1779,7 +2107,7 @@ std::string command(eHyprCtlOutputFormat, std::string request) {
         gDumpPending = true;
     }
     else if (request != "hyprveil" && request != "hyprveil status")
-        return R"({"error":"usage: hyprveil [status|omit|black|spoiler|image ABSOLUTE_PATH|dump-local]"})";
+        return R"({"error":"usage: hyprveil [status|omit|black|color|spoiler|image ABSOLUTE_PATH|dump-local]"})";
     if (!updated) return "{\"error\":" + quotedJson(updated.error()) + "}";
     const auto pendingSnapshots = std::count_if(gSessionPolicies.begin(), gSessionPolicies.end(), [](const auto& entry) {
         const auto* session = entry.second.session.get();
@@ -1797,7 +2125,10 @@ std::string command(eHyprCtlOutputFormat, std::string request) {
            "\",\"spoiler_status\":\"" + gSpoilerStatus + "\",\"spoiler_shader_attempts\":" +
            std::to_string(gSpoilerShaderAttempts) + ",\"spoiler_animation_armed\":" +
            (gSpoilerTimer && gSpoilerTimer->armed() ? "true" : "false") + ",\"appearance\":" + gAppearance.json() +
-           ",\"icon\":" + quotedJson(gAppearance.icon) + ",\"icon_opacity\":" + std::to_string(gAppearance.iconOpacity) + "}";
+           ",\"icon\":" + quotedJson(gAppearance.icon) + ",\"icon_opacity\":" + std::to_string(gAppearance.iconOpacity) +
+           ",\"mask_color\":" + quotedJson(gMaskColor) + ",\"image_fit\":" + quotedJson(gImageFit) +
+           ",\"shader_path\":" + quotedJson(gShaderPath) + ",\"icon_path\":" + quotedJson(gIconPath) +
+           ",\"icon_status\":" + quotedJson(gIconStatus) + "}";
 }
 } // namespace
 
@@ -1942,7 +2273,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         gLockListener = g_pSessionLockManager->m_events.lock.listen([]() { capturePolicyChanged(); });
         gUnlockListener = g_pSessionLockManager->m_events.unlock.listen([]() { capturePolicyChanged(); });
         gSpoilerTimer = makeShared<CEventLoopTimer>(std::nullopt, [](SP<CEventLoopTimer> timer, void*) {
-            if (!gEnabled || gMode != "spoiler" || !gAppearance.animated() || !g_pHyprRenderer || g_pCompositor->m_isShuttingDown ||
+            if (!gEnabled || gMode != "spoiler" || !spoilerAnimated() || !g_pHyprRenderer || g_pCompositor->m_isShuttingDown ||
                 g_pSessionLockManager->isSessionLocked()) {
                 gAnimatedCaptures.clear();
                 return;
@@ -1971,7 +2302,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         cleanup();
         throw;
     }
-    return {"hyprveil", "Capture-only privacy with native typed Lua configuration; exact Hyprland ABI required", "OBJLAKO", "0.5.0"};
+    return {"hyprveil", "Capture-only privacy with native typed Lua configuration; exact Hyprland ABI required", "OBJLAKO", "0.6.0"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {

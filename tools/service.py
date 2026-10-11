@@ -76,11 +76,14 @@ DEFAULT_APPEARANCE = {"variant": "prism", "color": "#ffffff", "grain": 50,
                       "speed": 100, "darkness": 50, "eye": True, "eye_size": 80,
                       "icon": "eye", "icon_opacity": 75}
 ICON_FIELDS = {"icon", "icon_opacity"}
+NATIVE_MODES = ("omit", "black", "color", "image", "spoiler")
+IMAGE_FITS = ("fill", "fit", "tile", "stretch")
+DEFAULT_RENDER = {"mask_color": "#000000", "image_fit": "stretch", "shader_path": "", "icon_path": ""}
 APPEARANCE_RANGES = {"grain": (0, 100), "speed": (0, 200),
                      "darkness": (0, 100), "eye_size": (40, 128), "icon_opacity": (0, 100)}
 LUA_BEGIN = "-- BEGIN HYPRVEIL SETTINGS v1"
 LUA_END = "-- END HYPRVEIL SETTINGS v1"
-CONFIG_FIELDS = ("mode", "image_path", *DEFAULT_APPEARANCE)
+CONFIG_FIELDS = ("mode", "image_path", *DEFAULT_APPEARANCE, *DEFAULT_RENDER)
 
 
 def lua_string(value):
@@ -90,26 +93,62 @@ def lua_string(value):
                          else "\\" + f"{byte:03d}" for byte in value.encode("utf-8")) + '"'
 
 
-def native_values(status):
+def valid_asset_path(value):
+    if not isinstance(value, str):
+        return False
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeError:
+        return False
+    return size <= 4096 and \
+        not any(ord(c) < 32 or ord(c) == 127 for c in value) and (not value or Path(value).is_absolute())
+
+
+def native_values(status, canonical=True):
     if not isinstance(status.get("appearance"), dict):
         raise Refused("invalid native appearance")
     appearance = dict(status["appearance"])
     for field in ICON_FIELDS:
         if field in status:
             appearance[field] = status[field]
-    appearance = validate_appearance(appearance, canonical=True)
+    appearance = validate_appearance(appearance, canonical=canonical)
     mode, image = status.get("mode"), status.get("image_path", "")
-    if mode not in ("omit", "black", "image", "spoiler") or not isinstance(image, str) or len(image.encode()) > 4096 or \
-       any(ord(c) < 32 or ord(c) == 127 for c in image) or image and not Path(image).is_absolute():
+    if mode not in NATIVE_MODES or not valid_asset_path(image):
         raise Refused("invalid native configuration values")
-    return dict(mode=mode, image_path=image, **appearance)
+    render = {key: status.get(key, default) for key, default in DEFAULT_RENDER.items()}
+    color = render["mask_color"]
+    if not isinstance(color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", color) or canonical and color != color.lower():
+        raise Refused("mask_color must be #RRGGBB")
+    if not isinstance(render["image_fit"], str) or render["image_fit"] not in IMAGE_FITS:
+        raise Refused("image_fit must be fill, fit, tile or stretch")
+    for key in ("shader_path", "icon_path"):
+        if not valid_asset_path(render[key]):
+            raise Refused(key + " must be empty or a bounded absolute path without control characters")
+    if render["shader_path"] and not render["shader_path"].lower().endswith(".frag"):
+        raise Refused("shader_path must end in .frag")
+    return dict(mode=mode, image_path=image, **appearance, **dict(render, mask_color=color.lower()))
 
 
-def lua_settings_block(values):
-    values = native_values({"mode": values["mode"], "image_path": values["image_path"],
-                   "appearance": validate_appearance({key: values[key] for key in DEFAULT_APPEARANCE if key in values})})
+def config_values(values, canonical=False):
+    return native_values({"mode": values["mode"], "image_path": values["image_path"],
+        "appearance": {key: values[key] for key in DEFAULT_APPEARANCE if key in values},
+        **{key: values[key] for key in DEFAULT_RENDER if key in values}}, canonical=canonical)
+
+
+def normalize_config_patch(patch, current=None):
+    if not isinstance(patch, dict) or patch.keys() - set(CONFIG_FIELDS):
+        raise Refused("unsupported native configuration patch")
+    base = native_values(current) if current is not None else dict(mode="black", image_path="", **DEFAULT_APPEARANCE, **DEFAULT_RENDER)
+    candidate = config_values(dict(base, **patch))
+    return {key: candidate[key] for key in patch}
+
+
+def lua_settings_block(values, include_render=True):
+    values = config_values(values)
     lines = [LUA_BEGIN, "local hyprveil_settings = {"]
     for key in CONFIG_FIELDS:
+        if key in DEFAULT_RENDER and not include_render:
+            continue
         value = values[key]
         literal = lua_string(value) if isinstance(value, str) else ("true" if value else "false") if type(value) is bool else str(value)
         lines.append(f"  {key} = {literal},")
@@ -117,7 +156,8 @@ def lua_settings_block(values):
 
 
 def lua_settings_source(settings):
-    values = dict(mode=settings["desired_mode"], image_path=settings["image_path"], **settings["appearance"])
+    values = dict(mode=settings["desired_mode"], image_path=settings["image_path"], **settings["appearance"],
+                  **{key: settings.get(key, default) for key, default in DEFAULT_RENDER.items()})
     return ("-- Hyprveil: standard Hyprland configuration. Edit the literal values below.\n"
             "-- The Omarchy panel updates this block; custom Lua may follow it.\n" + lua_settings_block(values) + "\n\n"
             'local _, missing = hl.get_config("plugin.hyprveil.mode")\n'
@@ -128,7 +168,7 @@ def lua_settings_source(settings):
 
 def parse_lua_settings(contents):
     # We never execute Lua in the controller. GUI persistence is limited to a
-    # literal nine-field table; unrelated code outside the block is preserved.
+    # literal settings table; unrelated code outside the block is preserved.
     text = contents.decode("utf-8")
     if text.count(LUA_BEGIN) != 1 or text.count(LUA_END) != 1:
         raise Refused("hyprveil-settings.lua needs one managed settings block")
@@ -173,10 +213,9 @@ def parse_lua_settings(contents):
         else:
             values[key] = literal == "true" if literal in ("true", "false") else int(literal)
         remainder = remainder[field.end():]
-    if not set(CONFIG_FIELDS) - ICON_FIELDS <= values.keys():
+    if not set(CONFIG_FIELDS) - ICON_FIELDS - DEFAULT_RENDER.keys() <= values.keys():
         raise Refused("settings block must contain all supported legacy fields")
-    values = native_values({"mode": values["mode"], "image_path": values["image_path"],
-                   "appearance": validate_appearance({key: values[key] for key in DEFAULT_APPEARANCE if key in values})})
+    values = config_values(values)
     return text, start, finish + len(LUA_END), values
 
 
@@ -238,8 +277,8 @@ def validate_appearance(value, canonical=False):
     variant = APPEARANCE_ALIASES.get(value["variant"], value["variant"]) if isinstance(value["variant"], str) else None
     if variant not in APPEARANCE_VARIANTS:
         raise Refused("invalid appearance variant")
-    if not isinstance(value["icon"], str) or value["icon"] not in ("eye", "lock", "shield", "none"):
-        raise Refused("icon must be eye, lock, shield or none")
+    if not isinstance(value["icon"], str) or value["icon"] not in ("eye", "lock", "shield", "none", "custom"):
+        raise Refused("icon must be eye, lock, shield, none or custom")
     color = value["color"]
     if not isinstance(color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", color) or canonical and color != color.lower():
         raise Refused("appearance color must be #RRGGBB")
@@ -269,15 +308,20 @@ def appearance_integer(field):
 
 def appearance_arguments(parser):
     parser.add_argument("--variant", choices=(*APPEARANCE_VARIANTS, *APPEARANCE_ALIASES))
-    parser.add_argument("--icon", choices=("eye", "lock", "shield", "none"))
+    parser.add_argument("--icon", choices=("eye", "lock", "shield", "none", "custom"))
     parser.add_argument("--color", help="opaque tint in #RRGGBB format")
     for field in APPEARANCE_RANGES:
         parser.add_argument("--" + field.replace("_", "-"), type=appearance_integer(field))
     parser.add_argument("--eye", choices=("on", "off"))
+    parser.add_argument("--mask-color", help="opaque color-mode fill and image-fit background in #RRGGBB")
+    parser.add_argument("--image-fit", choices=IMAGE_FITS)
+    parser.add_argument("--image-path", help="absolute replacement PNG path; empty clears an inactive image")
+    parser.add_argument("--shader-path", help="absolute trusted .frag file; empty restores the built-in spoiler")
+    parser.add_argument("--icon-path", help="absolute custom PNG icon path; empty clears an inactive icon")
 
 
 def appearance_patch(args):
-    patch = {field: getattr(args, field) for field in DEFAULT_APPEARANCE if getattr(args, field, None) is not None}
+    patch = {field: getattr(args, field) for field in (*DEFAULT_APPEARANCE, *DEFAULT_RENDER, "image_path") if getattr(args, field, None) is not None}
     if "eye" in patch:
         patch["eye"] = patch["eye"] == "on"
     return patch
@@ -362,7 +406,7 @@ def digest_file(path, private_release=False, process_executable=False):
 
 def manifest(data):
     required = {"version", "enabled", "plugin", "plugin_sha256", "compositor_sha256", "abi_hash"}
-    optional = {"desired_mode", "image_path", "appearance"}
+    optional = {"desired_mode", "image_path", "appearance", *DEFAULT_RENDER}
     if not isinstance(data, dict) or not required <= data.keys() or data.keys() - required - optional:
         raise Refused("invalid configuration fields")
     if type(data["version"]) is not int or data["version"] != 1 or type(data["enabled"]) is not bool:
@@ -379,10 +423,11 @@ def manifest(data):
     result.setdefault("desired_mode", "omit")
     result.setdefault("image_path", "")
     result["appearance"] = validate_appearance(result.get("appearance", DEFAULT_APPEARANCE))
-    if result["desired_mode"] not in ("omit", "black", "image", "spoiler") or not isinstance(result["image_path"], str) or any(c in result["image_path"] for c in "\x00\r\n"):
+    if result["desired_mode"] not in NATIVE_MODES or not valid_asset_path(result["image_path"]):
         raise Refused("invalid desired mode or image path")
-    if result["image_path"] and not Path(result["image_path"]).is_absolute():
-        raise Refused("persistent image path must be absolute")
+    normalized = config_values(dict(mode=result["desired_mode"], image_path=result["image_path"], **result["appearance"],
+                                    **{key: result[key] for key in DEFAULT_RENDER if key in result}))
+    result.update({key: normalized[key] for key in DEFAULT_RENDER})
     return result
 
 
@@ -551,7 +596,7 @@ class Controller:
         return True
 
     def live_status(self, value):
-        if not isinstance(value, dict) or value.get("session") != "live" or value.get("mode") not in ("omit", "black", "image", "spoiler") or value.get("local_dump") != "disabled-in-live":
+        if not isinstance(value, dict) or value.get("session") != "live" or value.get("mode") not in NATIVE_MODES or value.get("local_dump") != "disabled-in-live":
             raise Refused("invalid live plugin status")
         # Missing appearance remains valid for black/status commands used by
         # the guarded upgrade of a pinned 0.2 predecessor.
@@ -567,6 +612,8 @@ class Controller:
         if "config_api" in value:
             if type(value["config_api"]) is not int or value["config_api"] != 1 or "image_path" not in value:
                 raise Refused("invalid native configuration API")
+            if value.keys() & DEFAULT_RENDER.keys() and not DEFAULT_RENDER.keys() <= value.keys():
+                raise Refused("incomplete native rendering status")
             native_values(value)
         return value
 
@@ -601,26 +648,28 @@ class Controller:
 
     def native_configure(self, patch, expected):
         before = native_values(expected)
-        patch = dict(patch)
-        if "variant" in patch and isinstance(patch["variant"], str):
-            patch["variant"] = APPEARANCE_ALIASES.get(patch["variant"], patch["variant"])
-        if "color" in patch and isinstance(patch["color"], str):
-            patch["color"] = patch["color"].lower()
+        patch = normalize_config_patch(patch, expected)
         if patch.keys() & ICON_FIELDS and not ICON_FIELDS <= expected.keys():
             raise Refused("this loaded release does not support icon customization")
+        required = patch.keys() & DEFAULT_RENDER.keys()
+        if patch.get("mode") == "color":
+            required = required | {"mask_color"}
+        if patch.get("icon") == "custom":
+            required = required | {"icon_path"}
+        if not required <= expected.keys():
+            raise Refused("this loaded release does not support the requested rendering settings")
         candidate = dict(before, **patch)
         # Validation also bounds every emitted literal and admits only fixed
         # keys. The compare and partial commit execute in one compositor turn.
         lua_settings_block(candidate)
-        if patch.keys() - set(CONFIG_FIELDS):
-            raise Refused("unsupported native configuration patch")
+        self.preflight_assets(patch, candidate)
         def literal(value):
             return lua_string(value) if isinstance(value, str) else ("true" if value else "false") if type(value) is bool else str(value)
         assertions = []
         for field, value in before.items():
-            if field in ICON_FIELDS and field not in expected:
+            if field in (*ICON_FIELDS, *DEFAULT_RENDER) and field not in expected:
                 continue
-            accessor = "s." + field if field in ("mode", "image_path", *ICON_FIELDS) else "s.appearance." + field
+            accessor = "s." + field if field in ("mode", "image_path", *ICON_FIELDS, *DEFAULT_RENDER) else "s.appearance." + field
             assertions.append(accessor + " == " + literal(value))
         entries = ",".join(key + "=" + literal(value) for key, value in patch.items())
         code = ('local p=hl.plugin.hyprveil; assert(p,"Hyprveil unavailable"); local s=p.status(); '
@@ -730,9 +779,60 @@ class Controller:
         self.write_marker(f"hyprveil-live-v1\n{self.target.pid}\n{self.signature}\nblack\n{expires}\n", previous)
         return expires
 
+    def asset_without_links(self, path):
+        if not valid_asset_path(path) or not path:
+            raise Refused("asset path must be bounded and absolute without control characters")
+        asset = Path(path)
+        for component in (*reversed(asset.parents), asset):
+            if stat.S_ISLNK(os.lstat(component).st_mode):
+                raise Refused("asset path must not contain symlinks")
+        return asset
+
+    def safe_shader(self, path):
+        shader = self.asset_without_links(path)
+        if shader.suffix.lower() != ".frag":
+            raise Refused("shader_path must end in .frag")
+        fd = os.open(shader, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 64 * 1024:
+                raise Refused("shader must be a regular text file no larger than 64 KiB")
+            data = bytearray()
+            while chunk := os.read(fd, 8192):
+                data.extend(chunk)
+                if len(data) > 64 * 1024:
+                    raise Refused("shader exceeds the 64 KiB source limit")
+        finally:
+            os.close(fd)
+        try:
+            text = data.decode("utf-8")
+        except UnicodeError as error:
+            raise Refused("shader must contain UTF-8 text") from error
+        if not text or any(ord(char) < 32 and char not in "\n\r\t" or ord(char) == 127 for char in text):
+            raise Refused("shader must contain text without binary control characters")
+        return shader
+
+    def preflight_assets(self, patch, candidate):
+        # Revalidate explicitly selected assets, not unrelated retained paths:
+        # a file removed later must never prevent a black safety fallback.
+        if patch.get("shader_path"):
+            self.safe_shader(patch["shader_path"])
+        if patch.get("icon_path"):
+            self.safe_image(self.asset_without_links(patch["icon_path"]))
+        if patch.get("icon") == "custom":
+            if not candidate["icon_path"]:
+                raise Refused("custom icon requires icon_path")
+            self.safe_image(self.asset_without_links(candidate["icon_path"]))
+        if patch.keys() & {"icon", "icon_path"} and candidate["icon"] == "custom" and not candidate["icon_path"]:
+            raise Refused("custom icon requires icon_path")
+        if patch.get("image_path"):
+            self.safe_image(patch["image_path"])
+        if candidate["mode"] == "image" and not candidate["image_path"]:
+            raise Refused("image mode requires image_path")
+
     def safe_image(self, path):
         image = Path(path)
-        if not image.is_absolute() or any(c in str(image) for c in "\x00\r\n"):
+        if not valid_asset_path(str(image)) or not image.is_absolute():
             raise Refused("image path must be absolute")
         fd = os.open(image, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
         try:
@@ -855,11 +955,12 @@ class Controller:
         if current.get("config_api") != 1:
             return None
         before = read_lua_settings(self.lua_path)
-        text, start, finish, _ = parse_lua_settings(before[0])
-        values = dict(native_values(current), **updates)
-        values = native_values({"mode": values["mode"], "image_path": values["image_path"],
-                                "appearance": validate_appearance({key: values[key] for key in DEFAULT_APPEARANCE})})
-        contents = (text[:start] + lua_settings_block(values) + text[finish:]).encode()
+        text, start, finish, saved = parse_lua_settings(before[0])
+        values = config_values(dict(native_values(current), **updates))
+        include_render = DEFAULT_RENDER.keys() <= current.keys()
+        if not include_render and any(saved[key] != default for key, default in DEFAULT_RENDER.items()):
+            raise Refused("the loaded release cannot preserve these saved rendering settings")
+        contents = (text[:start] + lua_settings_block(values, include_render=include_render) + text[finish:]).encode()
         return before, contents, values
 
     def reload_config(self):
@@ -930,6 +1031,7 @@ class Controller:
                     updated["image_path"] = str(chosen)
                 if plan is not None:
                     updated.update(appearance=status["appearance"], image_path=status["image_path"])
+                    updated.update({key: native_values(status)[key] for key in DEFAULT_RENDER})
                 atomic_json(self.config, updated)
                 self.settings = updated
         except (OSError, Refused):
@@ -950,6 +1052,7 @@ class Controller:
                 updated = dict(self.settings, appearance=value)
                 if plan is not None:
                     updated.update(desired_mode=status["mode"], image_path=status["image_path"])
+                    updated.update({key: native_values(status)[key] for key in DEFAULT_RENDER})
                 atomic_json(self.config, updated)
                 self.settings = updated
         except (OSError, Refused):
@@ -1057,7 +1160,9 @@ class Controller:
             self.settings = manifest(json.loads(read_private(self.config)))
             # Validate patches before IPC, then merge against actual native
             # values below so a Lua/keybinding change is never overwritten.
-            requested_appearance = merge_appearance(self.settings["appearance"], appearance if appearance is not None else {}) if action == "configure" else None
+            requested_patch = normalize_config_patch(appearance if appearance is not None else {}) if action == "configure" else None
+            requested_appearance = merge_appearance(self.settings["appearance"],
+                {key: value for key, value in requested_patch.items() if key in DEFAULT_APPEARANCE}) if action == "configure" else None
             if action in ("start", "enable"):
                 if action == "enable":
                     self.settings["enabled"] = True
@@ -1070,9 +1175,11 @@ class Controller:
             loaded = self.active()
             if action == "status":
                 status = self.native("status") if loaded else None
+                values = native_values(status) if loaded and status.get("config_api") == 1 else dict(image_path=self.settings["image_path"], **{key: self.settings[key] for key in DEFAULT_RENDER})
                 return {"enabled": self.settings["enabled"], "loaded": loaded,
                         "desired_mode": self.settings["desired_mode"],
                         "appearance": validate_appearance(status.get("appearance"), canonical=True) if loaded else self.settings["appearance"],
+                        **{key: values[key] for key in ("image_path", *DEFAULT_RENDER)},
                         "config_file": str(self.lua_path), "status": status}
             if action in ("stop", "disable"):
                 if loaded:
@@ -1091,9 +1198,12 @@ class Controller:
             if action == "configure":
                 current = self.native("status")
                 if current.get("config_api") == 1:
-                    requested_appearance = merge_appearance(current["appearance"], appearance if appearance is not None else {})
+                    requested_appearance = merge_appearance(current["appearance"],
+                        {key: value for key, value in requested_patch.items() if key in DEFAULT_APPEARANCE})
+                elif requested_patch.keys() - DEFAULT_APPEARANCE.keys():
+                    raise Refused("this loaded release does not support rendering settings")
                 return self.apply_appearance(requested_appearance, persist=True,
-                    patch=appearance if current.get("config_api") == 1 else None, expected=current)
+                    patch=requested_patch if current.get("config_api") == 1 else None, expected=current)
             return self.apply_mode(action, str(image) if image is not None else "", persist=True)
 
 
@@ -1102,7 +1212,7 @@ def main(argv=None):
     parser.add_argument("--signature", help="exact Hyprland instance; otherwise use the caller's instance environment")
     parser.add_argument("--config", type=Path, help="owned private installation manifest")
     sub = parser.add_subparsers(dest="action", required=True)
-    for action in ("start", "status", "omit", "black", "spoiler", "stop", "disable", "enable", "reload-config",
+    for action in ("start", "status", "omit", "black", "color", "spoiler", "stop", "disable", "enable", "reload-config",
                    "toggle", "hide", "show", "reset-sharing"):
         command = sub.add_parser(action)
         if action == "start":
