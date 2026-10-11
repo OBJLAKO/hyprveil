@@ -13,6 +13,10 @@ local hyprveil_settings = {
   eye_size = 80,
   icon = "eye",
   icon_opacity = 75,
+  mask_color = "#000000",
+  image_fit = "stretch",
+  shader_path = "",
+  icon_path = "",
 }
 -- END HYPRVEIL SETTINGS v1
 

@@ -23,6 +23,8 @@ a guarantee for other compilers, drivers or compositor ABIs.
 | `render_geometry_smoke.py` | 20/20 | Native rounded corners, cursor zoom 2×, rigid/detached 1.5× cameras, final-image region cropping, unrelated public fullscreen occlusion and fully transparent window admission. |
 | `render_assets_smoke.py` | 31/31 | Chosen opaque color, legacy pure black, Stretch/Fill/Fit/Tile, PNG orientation, procedural GLSL, independent custom animation, zero-alpha shader output, compile/resource failure, one-shot retry latch, symlink replacement and custom PNG icon size/aspect/opacity. |
 | `fx_smoke.py` | 35/35 | Actual OmaFX 0.4.0 private/public mesh transformers, native zoom 1×/2×, nonzero-origin region capture, unknown mixed-transformer fallback and spare mirrored-buffer exclusion. |
+| `native_config_smoke.py --nested-output` | 204/204 | Eleven legacy settings through Lua/status/getoption and mutation routes, old appearance envelopes, atomic invalid patches, invalid-file Black fallback, native window identity/sharing reset and detached callback teardown. |
+| `cli_assets_smoke.py` | 15/15 | Real standalone CLI/native IPC, all fifteen managed settings, asset activation, preserved Lua suffix, zero global reloads and safe Black after files disappear. |
 
 The FX suite compared 19 exported frames against the corresponding synthetic
 local scene. All tested exports were opaque and contained no private-marker
@@ -61,6 +63,14 @@ Local LeakSanitizer was disabled because its ptrace mechanism is unavailable;
 these checks do not instrument Hyprland, Cairo or the GPU driver. CI separately
 requests ASan/UBSan/LSan.
 
+A further 15/15 standard-admission checks used the real standalone CLI and
+native IPC. Only target selection was adapted to attest the marked test
+compositor. The checks covered partial updates, all fifteen literal managed
+settings, preserved unrelated Lua, PNG placement, custom GLSL/icon readback,
+three opaque private-marker-free exports and Black after all asset files were
+removed. The actual configuration-evaluation counter stayed at 3 throughout
+the saves: no global reload occurred.
+
 The companion panel records its own unit, actual offscreen QML, process failure
 and installer-transition results in its reviewer notes. Its new rendering
 controls require explicit native capabilities; client defaults do not enable
@@ -81,7 +91,7 @@ frame as private-marker pixels beyond the original black rectangle. Keep the
 plugin loaded in Black/Omit mode during sharing; stop sharing before a native
 update or unload. This pre-existing boundary is not fixed by this update.
 
-The older portal, permission, transient-window, lock and stress results are
+The older portal, permission, dedicated transient-window, lock and stress results are
 retained in [historical validation](VALIDATION.md); they were not all repeated
 for this update. Real cold login, a live installation of 0.6.0, physical mirror
 hardware, HDR, DMA-BUF portal transport, arbitrary screen effects and a long

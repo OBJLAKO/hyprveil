@@ -47,7 +47,7 @@ at compositor startup; a new permission entry may require another login.
 ## Settings and keys
 
 The [settings example](../examples/hyprveil-settings.lua) contains a literal
-eleven-field table that the optional CLI and panel can update safely. Copy it to
+fifteen-field table that the optional CLI and panel can update safely. Copy it to
 `~/.config/hypr/hyprveil-settings.lua`, then include it with:
 
 ```lua

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate native Hyprland settings and Lua callbacks in a synthetic lab.
+"""Regress the eleven legacy native settings and Lua callbacks in a synthetic lab.
 
 The parent Wayland socket only hosts the owned nested compositor. Every test
 control call and capture reattests its private marker and owning process.
@@ -24,6 +24,7 @@ from verify_capture import absence_report, color_fraction, differing_fraction, o
 
 LEGACY_APPEARANCE = ("variant", "color", "grain", "speed", "darkness", "eye", "eye_size")
 FIELDS = ("mode", "image_path", *LEGACY_APPEARANCE, "icon", "icon_opacity")
+REVIEWED_RELEASES = ("0.5.0", "0.6.0")
 DEFAULTS = dict(mode="black", image_path="", **DEFAULT_APPEARANCE)
 CALLBACKS = ("configure", "status", "mode", "cycle", "active_privacy", "set_hidden", "toggle", "reset_sharing")
 
@@ -52,7 +53,7 @@ def flatten_status(value):
     result = {"mode": value.get("mode"), "image_path": value.get("image_path"),
               **validate_appearance(appearance, canonical=True)}
     if result.keys() != set(FIELDS):
-        raise RuntimeError("native settings schema differs from the exact eleven fields")
+        raise RuntimeError("native settings schema differs from the eleven legacy fields")
     return result
 
 
@@ -61,8 +62,22 @@ class NativeConfigSmoke(SpoilerSmoke):
         args.force_shader_failure = False
         super().__init__(args)
         args.suite = "native-config"
-        self.report["native_settings_scope"] = "eleven typed config values, atomic Lua patch, commands, dispatchers and callback teardown"
+        self.report["native_settings_scope"] = "eleven legacy typed config values, atomic Lua patch, commands, dispatchers and callback teardown"
+        self.report["legacy_settings_fields"] = list(FIELDS)
+        self.report["reviewed_releases"] = list(REVIEWED_RELEASES)
+        self.report["output_backend"] = "owned nested Wayland" if args.nested_output else "synthetic headless"
         self.base_config = None
+
+    def monitor(self):
+        if not self.args.nested_output:
+            return super().monitor()
+        return next(monitor for monitor in json.loads(self.ctl("-j", "monitors"))
+                    if monitor["name"].startswith("WAYLAND-") and min(monitor["width"], monitor["height"]) > 0)
+
+    def capture(self, path):
+        if not self.args.nested_output:
+            return super().capture(path)
+        self.command(["grim", "-o", self.monitor()["name"], str(path)])
 
     def native(self):
         return json.loads(self.ctl("hyprveil", "status"))
@@ -226,7 +241,7 @@ class NativeConfigSmoke(SpoilerSmoke):
             # in both typed settings and rendered capture behavior.
             self.patch({"variant": variant})
             selected["variant"] = variant
-            self.settings_agree("native " + variant + " single-field selection preserves all eleven values", selected)
+            self.settings_agree("native " + variant + " single-field selection preserves all eleven legacy values", selected)
             self.private_frame("enum-" + variant, before)
         for alias, canonical in APPEARANCE_ALIASES.items():
             self.patch({"variant": alias})
@@ -417,10 +432,19 @@ class NativeConfigSmoke(SpoilerSmoke):
         self.shared_frame("share-pending-unload", before)
 
     def tests(self):
-        self.ctl("output", "create", "headless", "HV-TEST")
-        for monitor in json.loads(self.ctl("-j", "monitors")):
-            if monitor["name"].startswith("WAYLAND-"):
-                self.ctl("output", "remove", monitor["name"])
+        if self.args.nested_output:
+            output = self.monitor()["name"]
+            config = self.runtime / "hyprland.lua"
+            config.write_text(config.read_text() + "\nhl.monitor({output=" + lua_literal(output) +
+                              ',mode="1024x768@60",position="0x0",scale=1})\n')
+            self.ctl("reload")
+            self.wait_until(lambda: min(self.monitor()["width"], self.monitor()["height"]) > 0,
+                            "owned nested Wayland output")
+        else:
+            self.ctl("output", "create", "headless", "HV-TEST")
+            for monitor in json.loads(self.ctl("-j", "monitors")):
+                if monitor["name"].startswith("WAYLAND-"):
+                    self.ctl("output", "remove", monitor["name"])
         self.base_config = (self.runtime / "hyprland.lua").read_text()
         self.fixture("background")
         self.popup_fixture()
@@ -432,8 +456,9 @@ class NativeConfigSmoke(SpoilerSmoke):
         self.ctl("dismissnotify", "-1")
         self.report["compositor"] = json.loads(self.ctl("-j", "version"))
         plugins = json.loads(self.ctl("-j", "plugin", "list"))
-        self.assert_check("loaded module is exactly native-config release 0.5.0",
-                          any(item["name"] == "hyprveil" and item["version"] == "0.5.0" for item in plugins))
+        self.assert_check("eleven legacy fields run on a reviewed native-config release (0.5.0 or 0.6.0)",
+                          any(item["name"] == "hyprveil" and item["version"] in REVIEWED_RELEASES for item in plugins),
+                          plugin_versions=[item["version"] for item in plugins if item["name"] == "hyprveil"])
         before = self.geometry()
         self.settings_agree("initial safe native defaults", DEFAULTS)
         self.private_frame("initial-black", before, black=True)
@@ -517,7 +542,7 @@ class NativeConfigSmoke(SpoilerSmoke):
                         color="#4488aa", darkness=12, eye=True, eye_size=40)
         self.write_config(selected)
         self.assert_check("typed native file reload has no compositor config errors", not self.ctl("configerrors"))
-        self.settings_agree("native file reload selects all eleven fields", selected)
+        self.settings_agree("native file reload selects all eleven legacy fields", selected)
         self.private_frame("native-file-telegram", before)
         local = self.local_image("native-file-local")
         self.assert_check("native settings leave original local window fully visible",
@@ -561,6 +586,8 @@ def main():
     parser.add_argument("--parent-runtime", required=True)
     parser.add_argument("--parent-display", required=True)
     parser.add_argument("--plugin", type=Path, default=PROJECT / "build/hyprveil.so")
+    parser.add_argument("--nested-output", action="store_true",
+                        help="capture only the owned nested WAYLAND output; retain headless as the default")
     run = NativeConfigSmoke(parser.parse_args())
     def interrupted(signum, frame):
         raise KeyboardInterrupt("native config smoke interrupted")

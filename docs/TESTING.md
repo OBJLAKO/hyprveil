@@ -111,7 +111,7 @@ readback. Never crop the personal desktop to obtain a local test reference.
 | --- | --- |
 | `smoke.py` | Local/capture distinction, monitor/region, omit/image/black, PNG fallback, foreground stacking and geometry. Requires an existing marked lab. |
 | `spoiler_smoke.py` | Opaque animation, persistent `copy_with_damage`, frozen settings, fullscreen and appearance extrema. `--force-shader-failure` exercises the black latch. |
-| `native_config_smoke.py` | All eleven native fields and mutation routes, invalid atomic patches, bad-file black fallback, focused identity, sharing reset and callback teardown. |
+| `native_config_smoke.py` | The eleven legacy native fields and mutation routes, invalid atomic patches, bad-file black fallback, focused identity, sharing reset and callback teardown. `--nested-output` keeps the owned Wayland output when the headless backend cannot provide a mode. |
 | `hyprpm_smoke.py` | Standard no-marker native admission, public API and real standalone CLI, settings second-pass loading and managed persistence. This does not run the privileged hyprpm cache manager or a physical cold login. |
 | `design_gallery.py` | Actual GPU gallery of every style, distinct output, opaque private replacement, animation/freeze/extrema and static-style timer behavior. |
 | `style_bounds_smoke.py` | Four expressive styles at four small sizes and scales 1/1.25, opacity, privacy, exact frozen repeats and unchanged local visibility. Captures require visual review for readability. |
@@ -124,6 +124,7 @@ readback. Never crop the personal desktop to obtain a local test reference.
 | `fx_smoke.py --fx-plugin /absolute/path/omarchy-fx.so` | Actual private/public mesh deformation, mask silhouette inheritance and pixel safety. Requires an existing reviewed compatible FX build; it copies that artifact into the owned lab. |
 | `render_geometry_smoke.py` | Native zoom and nonzero-origin region crop, rigid/detached cameras, rounding, fullscreen stacking and fully faded views. |
 | `render_assets_smoke.py` | Four PNG fit modes, color mask, custom procedural GLSL and PNG icon, invalid-resource fallback and file replacement. |
+| `cli_assets_smoke.py` | Real standalone CLI, fifteen-field managed persistence and native asset captures; standard admission with only marked-lab target selection adapted. |
 | `stress.py` | Movement, resize, scale, reload, unload/reload and bounded repeated captures. |
 | `upgrade_smoke.py --old-plugin /absolute/path/reviewed-old.so` | Exact allowlisted predecessor, held gap and weak retention handoff. An optional `--watcher` tests the independent GUI stream. |
 
