@@ -1,7 +1,7 @@
 [repository]
 name = "hyprveil"
 authors = ["OBJLAKO"]
-commit_pins = [["efb50993780079460b0cbed1363e2166a2de1d9f", "e97581d457ef552859abaa8080ca22f3bc5255ca"]]
+commit_pins = [["efb50993780079460b0cbed1363e2166a2de1d9f", "c834c06c69f461f70022f215dc7b1791eb8c3e3f"]]
 
 [hyprveil]
 description = "Keep private windows visible locally and out of screen sharing"
