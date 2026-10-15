@@ -176,3 +176,9 @@ make test-session-guard test-png-guard test-privacy-policy \
 [Testing guide](docs/TESTING.md) · [Contributing](CONTRIBUTING.md) · [MIT license](LICENSE)
 
 Created by [OBJLAKO](https://github.com/OBJLAKO). Synthetic reproductions and compatibility reports help make Hyprveil useful on more desktops.
+
+### Independent notification protection
+
+Keep windows in 404 while hiding notification toasts or giving them a separate
+color, image or animated material. See [notification settings](docs/NOTIFICATIONS.md)
+for the native Lua API, CLI commands and precise input-region limits.

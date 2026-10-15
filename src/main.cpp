@@ -50,6 +50,7 @@
 #include <src/config/values/types/BoolValue.hpp>
 #include <src/desktop/state/FocusState.hpp>
 #include <src/protocols/XDGShell.hpp>
+#include <src/protocols/LayerShell.hpp>
 #include <src/xwayland/XWM.hpp>
 
 #include "SessionGuard.hpp"
@@ -59,6 +60,7 @@
 #include "Appearance.hpp"
 #include "NativeConfig.hpp"
 #include "RenderAssets.hpp"
+#include "NotificationConfig.hpp"
 
 namespace {
 using Frame = Screenshare::CScreenshareFrame;
@@ -153,6 +155,17 @@ SP<Render::ITexture> gCustomIcon;
 SP<CShader> gImageShader;
 bool gImageShaderAttempted = false;
 Hyprveil::Appearance gAppearance;
+struct NotificationRenderer {
+    Hyprveil::Notifications::Settings settings;
+    SP<Render::ITexture> image, icon;
+    SP<CShader> shader, imageShader;
+    std::string imagePath, iconPath;
+    std::string imageStatus = "not-loaded", iconStatus = "not-loaded", shaderStatus = "not-loaded";
+    std::string geometryStatus = "not-observed";
+    bool imageShaderAttempted = false;
+    std::uint64_t shaderAttempts = 0, omittedLayers = 0, maskedRegions = 0, geometryFallbacks = 0;
+};
+NotificationRenderer gNotifications;
 bool gConfigReady = false;
 bool gInitialized = false;
 bool gConfigBatch = false;
@@ -166,15 +179,16 @@ SP<CShader> gSpoilerShader;
 // lifetime. Shape/opacity changes reuse the cache without GPU allocation.
 constexpr std::array<std::string_view, 3> SPOILER_ICONS{"eye", "lock", "shield"};
 std::array<SP<Render::ITexture>, SPOILER_ICONS.size()> gSpoilerIcons;
-SP<Render::ITexture> spoilerIcon() {
-    if (gAppearance.icon == "custom") {
-        if (gCustomIcon && gCustomIcon->ok()) return gCustomIcon;
+SP<Render::ITexture> selectSpoilerIcon(const Hyprveil::Appearance& appearance, const SP<Render::ITexture>& custom) {
+    if (appearance.icon == "custom") {
+        if (custom && custom->ok()) return custom;
         return gSpoilerIcons[0]; // recognizable content-free fallback
     }
     for (std::size_t i = 0; i < SPOILER_ICONS.size(); ++i)
-        if (SPOILER_ICONS[i] == gAppearance.icon) return gSpoilerIcons[i];
+        if (SPOILER_ICONS[i] == appearance.icon) return gSpoilerIcons[i];
     return {};
 }
+SP<Render::ITexture> spoilerIcon() { return selectSpoilerIcon(gAppearance, gCustomIcon); }
 
 std::string gSpoilerStatus = "not-loaded";
 std::uint64_t gSpoilerShaderAttempts = 0;
@@ -226,6 +240,8 @@ CHyprSignalListener gWindowRulesListener;
 CHyprSignalListener gWindowCloseListener;
 CHyprSignalListener gWindowOpenListener;
 CHyprSignalListener gLayerRulesListener;
+CHyprSignalListener gLayerOpenListener;
+CHyprSignalListener gLayerCloseListener;
 CHyprSignalListener gConfigReloadListener;
 CHyprSignalListener gConfigPreReloadListener;
 CHyprSignalListener gLockListener;
@@ -300,15 +316,22 @@ SP<Render::ITexture> uploadPng(Renderer* renderer, const std::string& path, std:
     return texture;
 }
 
-std::array<float, 3> maskTint() { return Hyprveil::Appearance{.color=gMaskColor}.tint(); }
-CHyprColor fillColor() {
-    const auto tint = maskTint();
+std::array<float, 3> maskTint(const std::string& color = gMaskColor) { return Hyprveil::Appearance{.color=color}.tint(); }
+CHyprColor fillColor(const std::string& color = gMaskColor) {
+    const auto tint = maskTint(color);
     return CHyprColor{tint[0], tint[1], tint[2], 1.F};
 }
 bool spoilerAnimated() {
     if (gShaderPath.empty()) return gAppearance.animated();
     return gAppearance.speed > 0 && gSpoilerShader &&
         gSpoilerShader->getUniformLocation(SHADER_TIME) >= 0;
+}
+bool notificationAnimated() {
+    const auto& config = gNotifications.settings;
+    if (!config.enabled || config.profile.mode != "spoiler") return false;
+    if (config.profile.shaderPath.empty()) return config.profile.appearance.animated();
+    return config.profile.appearance.speed > 0 && gNotifications.shader &&
+        gNotifications.shader->getUniformLocation(SHADER_TIME) >= 0;
 }
 
 CFunctionHook* gMonitorHook = nullptr;
@@ -636,6 +659,19 @@ SP<CShader> compileSpoilerShader(const char* fragment, bool strictBuiltIn = true
     return shader;
 }
 
+void prepareSpoilerIcons(Renderer* renderer) {
+    for (std::size_t i = 0; i < SPOILER_ICONS.size(); ++i) {
+        if (gSpoilerIcons[i] && gSpoilerIcons[i]->ok()) continue;
+        auto* pixels = Hyprveil::Spoiler::icon(SPOILER_ICONS[i]);
+        if (!pixels) throw std::runtime_error("synthetic icon unavailable");
+        Hyprutils::Utils::CScopeGuard destroyPixels([pixels]() { cairo_surface_destroy(pixels); });
+        auto texture = renderer->createTexture(pixels);
+        if (!texture || !texture->ok()) throw std::runtime_error("synthetic icon texture unavailable");
+        texture->m_imageDescription = NColorManagement::DEFAULT_SRGB_IMAGE_DESCRIPTION;
+        gSpoilerIcons[i] = std::move(texture);
+    }
+}
+
 void prepareSpoiler(Renderer* renderer) {
     if (gSpoilerStatus == "black-fallback" || gSpoilerStatus == "color-fallback")
         return; // retry only after an explicit shader selection/reload
@@ -659,16 +695,7 @@ void prepareSpoiler(Renderer* renderer) {
             fragment = "#version 300 es\ninvalid synthetic lab shader\n";
         auto shader = compileSpoilerShader(fragment, gShaderPath.empty(), !gShaderPath.empty());
         if (!shader) throw std::runtime_error("synthetic shader unavailable");
-        for (std::size_t i = 0; i < SPOILER_ICONS.size(); ++i) {
-            if (gSpoilerIcons[i] && gSpoilerIcons[i]->ok()) continue;
-            auto* pixels = Hyprveil::Spoiler::icon(SPOILER_ICONS[i]);
-            if (!pixels) throw std::runtime_error("synthetic icon unavailable");
-            Hyprutils::Utils::CScopeGuard destroyPixels([pixels]() { cairo_surface_destroy(pixels); });
-            auto texture = renderer->createTexture(pixels);
-            if (!texture || !texture->ok()) throw std::runtime_error("synthetic icon texture unavailable");
-            texture->m_imageDescription = NColorManagement::DEFAULT_SRGB_IMAGE_DESCRIPTION;
-            gSpoilerIcons[i] = std::move(texture);
-        }
+        prepareSpoilerIcons(renderer);
         gSpoilerShader = std::move(shader);
         gSpoilerStatus = gShaderPath.empty() ? "ready" : "custom-ready";
     } catch (...) {
@@ -683,6 +710,79 @@ void prepareCustomIcon(Renderer* renderer) {
     gCustomIcon.reset();
     try { gCustomIcon = uploadPng(renderer, gIconPath, gIconStatus); }
     catch (...) { gIconStatus = "texture-failed"; }
+}
+
+void prepareNotificationAssets(Renderer* renderer) {
+    auto& resources = gNotifications;
+    const auto& settings = resources.settings.profile;
+    if (settings.mode == "image") {
+        if (resources.imagePath != settings.imagePath) {
+            resources.imagePath = settings.imagePath;
+            resources.image.reset();
+            try { resources.image = uploadPng(renderer, settings.imagePath, resources.imageStatus); }
+            catch (...) { resources.imageStatus = "texture-failed"; }
+        }
+        if (!resources.imageShaderAttempted) {
+            resources.imageShaderAttempted = true;
+            try { resources.imageShader = compileSpoilerShader(Hyprveil::Assets::IMAGE_FRAGMENT, false); }
+            catch (...) { resources.imageShader.reset(); }
+            if (!resources.imageShader) resources.imageStatus = "shader-failed";
+        }
+    }
+    if (settings.mode != "spoiler") return;
+    if (!resources.shader && resources.shaderStatus != "color-fallback") {
+        try {
+            if (renderer->type() != Renderer::RT_GL || !Render::GL::g_pHyprOpenGL)
+                throw std::runtime_error("notification shader requires GL");
+            ++resources.shaderAttempts;
+            std::string custom;
+            const char* fragment = Hyprveil::Spoiler::FRAGMENT;
+            if (!settings.shaderPath.empty()) {
+                const auto source = Hyprveil::Assets::readShader(settings.shaderPath);
+                if (!source) throw std::runtime_error(source.error());
+                const auto wrapped = Hyprveil::Assets::wrapShader(*source);
+                if (!wrapped) throw std::runtime_error(wrapped.error());
+                custom = *wrapped;
+                fragment = custom.c_str();
+            }
+            resources.shader = compileSpoilerShader(fragment, settings.shaderPath.empty(), !settings.shaderPath.empty());
+            if (!resources.shader) throw std::runtime_error("notification shader unavailable");
+            prepareSpoilerIcons(renderer);
+            resources.shaderStatus = settings.shaderPath.empty() ? "ready" : "custom-ready";
+        } catch (...) {
+            resources.shader.reset();
+            resources.shaderStatus = "color-fallback";
+        }
+    }
+    if (settings.appearance.icon == "custom" && resources.iconPath != settings.iconPath) {
+        resources.iconPath = settings.iconPath;
+        resources.icon.reset();
+        try { resources.icon = uploadPng(renderer, settings.iconPath, resources.iconStatus); }
+        catch (...) { resources.iconStatus = "texture-failed"; }
+    }
+}
+
+void drawNotificationMask(Renderer* renderer, PHLMONITOR monitor, const Time::steady_tp& now, CBox box, int rounding) {
+    const auto& settings = gNotifications.settings.profile;
+    const auto tint = maskTint(settings.maskColor);
+    renderer->addPassElement(makeUnique<CRectPassElement>(CRectPassElement::SRectData{
+        .box=box, .color=settings.mode == "black" ? Colors::BLACK : fillColor(settings.maskColor), .round=rounding, .roundingPower=2.F}));
+    if (settings.mode == "image" && gNotifications.image && gNotifications.image->ok() && gNotifications.imageShader)
+        renderer->addPassElement(makeUnique<SatinPass>(box, monitor->m_scale, 0.F, gNotifications.imageShader,
+            settings.appearance, rounding, 2.F, tint, gNotifications.image, Hyprveil::Assets::imageFit(settings.imageFit)));
+    if (settings.mode != "spoiler" || !gNotifications.shader || !gNotifications.shader->program()) return;
+    if (notificationAnimated()) animateCapture(monitor, now);
+    const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    renderer->addPassElement(makeUnique<SatinPass>(box, monitor->m_scale,
+        Hyprveil::Spoiler::seconds(static_cast<std::uint64_t>(milliseconds)), gNotifications.shader,
+        settings.appearance, rounding, 2.F, tint));
+    const auto icon = selectSpoilerIcon(settings.appearance, gNotifications.icon);
+    const double side = std::min({static_cast<double>(settings.appearance.eyeSize) * monitor->m_scale, box.w * .68, box.h * .68});
+    if (!settings.appearance.eye || settings.appearance.iconOpacity <= 0 || side < 12 || !icon || !icon->ok()) return;
+    const double ratio = std::min(side / std::max(icon->m_size.x, 1.0), side / std::max(icon->m_size.y, 1.0));
+    const auto iconSize = icon->m_size * ratio;
+    renderer->addPassElement(makeUnique<CTexPassElement>(CTexPassElement::SRenderData{
+        .tex=icon, .box=CBox{box.pos() + (box.size() - iconSize) / 2.0, iconSize}, .a=settings.appearance.iconOpacity / 100.F}));
 }
 
 void requireLab() {
@@ -1162,6 +1262,54 @@ void windowHook(Renderer* self, PHLWINDOW window, PHLMONITOR monitor, const Time
 }
 
 void layerHook(Renderer* self, PHLLS layer, PHLMONITOR monitor, const Time::steady_tp& now, bool popups, bool lockscreen) {
+    if (gCaptureScene && layer && gNotifications.settings.enabled && layer->m_namespace == gNotifications.settings.nameSpace) {
+        ++gOmittedLayerPasses;
+        ++gNotifications.omittedLayers;
+        // Omit the entire source surface and all of its popups. A replacement
+        // envelope never grants permission to sample the remaining pixels.
+        if (popups || lockscreen || !layer->visible() || gNotifications.settings.profile.mode == "omit") return;
+        try {
+            const auto surface = layer->wlSurface() ? layer->wlSurface()->resource() : nullptr;
+            if (!surface || !monitor) throw std::runtime_error("notification surface unavailable");
+            const auto& state = surface->m_current;
+            int count = 0;
+            const auto* rectangles = pixman_region32_rectangles(state.input.pixman(), &count);
+            if (state.inputIsInfinite || count < 1 || count > static_cast<int>(Hyprveil::Notifications::MAX_REGIONS))
+                throw std::runtime_error("notification input region unavailable");
+            const auto size = layer->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+            if (state.size.x <= 0 || state.size.y <= 0) throw std::runtime_error("notification size unavailable");
+            const Vector2D ratio{size.x / state.size.x, size.y / state.size.y};
+            std::vector<Hyprveil::Notifications::Rect> envelopes;
+            envelopes.reserve(count);
+            for (int index = 0; index < count; ++index) {
+                const auto& rectangle = rectangles[index];
+                envelopes.push_back({rectangle.x1 * ratio.x, rectangle.y1 * ratio.y,
+                    (static_cast<double>(rectangle.x2) - rectangle.x1) * ratio.x,
+                    (static_cast<double>(rectangle.y2) - rectangle.y1) * ratio.y});
+            }
+            const auto bounded = Hyprveil::Notifications::boundedRegions(envelopes, size.x, size.y, monitor->m_size.x, monitor->m_size.y, false);
+            if (!bounded) throw std::runtime_error(bounded.error());
+            prepareNotificationAssets(self);
+            int rounding = gNotifications.settings.rounding;
+            if (rounding < 0) {
+                static const auto globalRounding = CConfigValue<Config::INTEGER>("decoration:rounding");
+                rounding = globalRounding.good() ? static_cast<int>(std::clamp<Config::INTEGER>(*globalRounding, 0, 64)) : 12;
+            }
+            const auto position = layer->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT) - monitor->m_position;
+            for (const auto& rectangle : *bounded) {
+                auto box = CBox{position + Vector2D{rectangle.x, rectangle.y}, Vector2D{rectangle.width, rectangle.height}}.scale(monitor->m_scale);
+                const int radius = static_cast<int>(std::min<double>({rounding * monitor->m_scale, box.w / 2, box.h / 2}));
+                drawNotificationMask(self, monitor, now, box, radius);
+                ++gNotifications.maskedRegions;
+            }
+            gNotifications.geometryStatus = "bounded-input";
+        } catch (...) {
+            // Never fall back to the original layer or a full-screen fill.
+            gNotifications.geometryStatus = "omitted-unavailable-geometry";
+            ++gNotifications.geometryFallbacks;
+        }
+        return;
+    }
     if (gCaptureScene && layer && layer->m_ruleApplicator->noScreenShare().valueOrDefault()) {
         ++gOmittedLayerPasses;
         return;
@@ -1385,18 +1533,23 @@ CFunctionHook* makeHook(const std::string& readableName, const char* exactSymbol
 using NativeSettings = Hyprveil::NativeConfig::Settings;
 using NativePatch = Hyprveil::NativeConfig::Patch;
 using NativeValue = Hyprveil::NativeConfig::Value;
+using NotificationSettings = Hyprveil::Notifications::Settings;
 
 void syncNativeConfiguration();
+void syncNotificationConfiguration();
 void failNativeConfiguration() noexcept;
-void nativeConfigParsed() noexcept {
+void failNotificationConfiguration() noexcept;
+void nativeConfigParsed(bool notification = false) noexcept {
     if (!gConfigReady || gConfigBatch)
         return;
     try {
-        syncNativeConfiguration();
+        if (notification) syncNotificationConfiguration();
+        else syncNativeConfiguration();
     } catch (...) {
         // No exception may escape a Lua parser or compositor event callback.
         // A resource failure retains interception and an opaque replacement.
-        failNativeConfiguration();
+        if (notification) failNotificationConfiguration();
+        else failNativeConfiguration();
     }
 }
 
@@ -1405,7 +1558,8 @@ void nativeConfigParsed() noexcept {
 // Lua parsers in the public config-value map before exposing our callbacks.
 class NativeString final : public Config::Lua::CLuaConfigString {
   public:
-    NativeString(std::string field, std::string value) : CLuaConfigString(value), m_field(std::move(field)) {}
+    NativeString(std::string field, std::string value, bool notification = false)
+        : CLuaConfigString(value), m_field(std::move(field)), m_notification(notification) {}
     Config::Lua::SParseError parse(lua_State* state) override {
         try {
         using namespace Config::Lua;
@@ -1416,21 +1570,23 @@ class NativeString final : public Config::Lua::CLuaConfigString {
         if (size > 4096)
             return {.errorCode=PARSE_ERROR_BAD_VALUE, .message="Hyprveil string setting exceeds its bound"};
         NativeSettings checked;
-        const auto result = checked.set(m_field, std::string{bytes, size});
+        NotificationSettings notification;
+        const auto result = m_notification ? notification.set(m_field, std::string{bytes, size}) : checked.set(m_field, std::string{bytes, size});
         if (!result)
             return {.errorCode=PARSE_ERROR_BAD_VALUE, .message=result.error()};
         // Store canonical color and legacy variant aliases in the same
         // value read by hl.get_config/getoption and status.
-        const auto* canonical = m_field == "color" ? &checked.appearance.color :
-            m_field == "mask_color" ? &checked.maskColor :
-            m_field == "variant" ? &checked.appearance.variant : nullptr;
+        const auto& render = m_notification ? notification.profile : checked;
+        const auto* canonical = m_field == "color" ? &render.appearance.color :
+            m_field == "mask_color" ? &render.maskColor :
+            m_field == "variant" ? &render.appearance.variant : nullptr;
         if (canonical) lua_pushlstring(state, canonical->data(), canonical->size());
         const auto parsed = CLuaConfigString::parse(state);
         if (canonical) lua_pop(state, 1);
-        if (parsed.errorCode == PARSE_ERROR_OK) nativeConfigParsed();
+        if (parsed.errorCode == PARSE_ERROR_OK) nativeConfigParsed(m_notification);
         return parsed;
         } catch (...) {
-            failNativeConfiguration();
+            if (m_notification) failNotificationConfiguration(); else failNativeConfiguration();
             return {.errorCode=Config::Lua::PARSE_ERROR_BAD_VALUE, .message="resource error"};
         }
     }
@@ -1441,10 +1597,17 @@ class NativeString final : public Config::Lua::CLuaConfigString {
         value->assign("black");
         m_bSetByUser = true;
     }
+    void secureOmit() noexcept {
+        auto* value = const_cast<std::string*>(static_cast<const std::string*>(data()));
+        value->assign("omit");
+        m_bSetByUser = true;
+    }
   private:
     std::string m_field;
+    bool m_notification = false;
 };
 NativeString* gNativeModeParser = nullptr;
+NativeString* gNativeNotificationModeParser = nullptr;
 
 void failNativeConfiguration() noexcept {
     if (gNativeModeParser) gNativeModeParser->secureBlack();
@@ -1459,37 +1622,55 @@ void failNativeConfiguration() noexcept {
 
 class NativeInt final : public Config::Lua::CLuaConfigInt {
   public:
-    NativeInt(int value, int minimum, int maximum) : CLuaConfigInt(value, minimum, maximum) {}
+    NativeInt(int value, int minimum, int maximum, bool notification = false)
+        : CLuaConfigInt(value, minimum, maximum), m_notification(notification) {}
     Config::Lua::SParseError parse(lua_State* state) override {
         try {
         if (!lua_isinteger(state, -1))
             return {.errorCode=Config::Lua::PARSE_ERROR_BAD_TYPE, .message="Hyprveil integer setting requires an integer"};
         const auto parsed = CLuaConfigInt::parse(state);
-        if (parsed.errorCode == Config::Lua::PARSE_ERROR_OK) nativeConfigParsed();
+        if (parsed.errorCode == Config::Lua::PARSE_ERROR_OK) nativeConfigParsed(m_notification);
         return parsed;
         } catch (...) {
-            failNativeConfiguration();
+            if (m_notification) failNotificationConfiguration(); else failNativeConfiguration();
             return {.errorCode=Config::Lua::PARSE_ERROR_BAD_VALUE, .message="resource error"};
         }
     }
+  private:
+    bool m_notification = false;
 };
 
 class NativeBool final : public Config::Lua::CLuaConfigBool {
   public:
-    NativeBool(bool value) : CLuaConfigBool(value) {}
+    NativeBool(bool value, bool notification = false) : CLuaConfigBool(value), m_notification(notification) {}
     Config::Lua::SParseError parse(lua_State* state) override {
         try {
         if (lua_type(state, -1) != LUA_TBOOLEAN)
             return {.errorCode=Config::Lua::PARSE_ERROR_BAD_TYPE, .message="Hyprveil boolean setting requires a boolean"};
         const auto parsed = CLuaConfigBool::parse(state);
-        if (parsed.errorCode == Config::Lua::PARSE_ERROR_OK) nativeConfigParsed();
+        if (parsed.errorCode == Config::Lua::PARSE_ERROR_OK) nativeConfigParsed(m_notification);
         return parsed;
         } catch (...) {
-            failNativeConfiguration();
+            if (m_notification) failNotificationConfiguration(); else failNativeConfiguration();
             return {.errorCode=Config::Lua::PARSE_ERROR_BAD_VALUE, .message="resource error"};
         }
     }
+    void secureTrue() noexcept {
+        *const_cast<bool*>(static_cast<const bool*>(data())) = true;
+        m_bSetByUser = true;
+    }
+  private:
+    bool m_notification = false;
 };
+NativeBool* gNativeNotificationEnabledParser = nullptr;
+
+void failNotificationConfiguration() noexcept {
+    if (gNativeNotificationModeParser) gNativeNotificationModeParser->secureOmit();
+    if (gNativeNotificationEnabledParser) gNativeNotificationEnabledParser->secureTrue();
+    gNotifications.settings.enabled = true;
+    gNotifications.settings.profile.mode.assign("omit");
+    try { capturePolicyChanged(); } catch (...) {}
+}
 
 Config::Lua::ILuaConfigValue* nativeValue(std::string_view field) {
     // The config manager is uniquely owned: its weak handle supports access,
@@ -1522,6 +1703,41 @@ NativeSettings readNativeConfiguration() {
     return result;
 }
 
+NotificationSettings readNotificationConfiguration() {
+    NotificationSettings result;
+    for (const auto& [prefixed, value] : NotificationSettings{}.values()) {
+        const auto field = std::string_view{prefixed}.substr(Hyprveil::Notifications::PREFIX.size());
+        NativeValue current;
+        if (std::holds_alternative<std::string>(value)) current = nativeValue(prefixed)->asString();
+        else if (std::holds_alternative<bool>(value)) current = bool(nativeValue(prefixed)->asInt());
+        else current = std::int64_t{nativeValue(prefixed)->asInt()};
+        const auto parsed = result.set(field, current);
+        if (!parsed) throw std::runtime_error(parsed.error());
+    }
+    return result;
+}
+
+void syncNotificationConfiguration() {
+    const auto settings = readNotificationConfiguration();
+    auto& resources = gNotifications;
+    const bool changed = resources.settings != settings;
+    if (resources.settings.profile.shaderPath != settings.profile.shaderPath) {
+        resources.shader.reset(); resources.shaderStatus = "pending";
+    }
+    if (resources.settings.profile.imagePath != settings.profile.imagePath) {
+        resources.imagePath.clear(); resources.image.reset(); resources.imageStatus = "pending";
+    }
+    if (resources.settings.profile.iconPath != settings.profile.iconPath) {
+        resources.iconPath.clear(); resources.icon.reset(); resources.iconStatus = "pending";
+    }
+    resources.settings = settings;
+    if (!notificationAnimated() && (gMode != "spoiler" || !spoilerAnimated())) {
+        gAnimatedCaptures.clear();
+        if (gSpoilerTimer) gSpoilerTimer->updateTimeout(std::nullopt);
+    }
+    if (changed) { resources.geometryStatus = "not-observed"; capturePolicyChanged(); }
+}
+
 void syncNativeConfiguration() {
     const auto settings = readNativeConfiguration();
     const bool changed = gMode != settings.mode || gImagePath != settings.imagePath || gAppearance != settings.appearance ||
@@ -1543,7 +1759,7 @@ void syncNativeConfiguration() {
     gIconPath = settings.iconPath;
     gAppearance = settings.appearance;
     gEnabled = true;
-    if (gMode != "spoiler" || !spoilerAnimated()) {
+    if ((gMode != "spoiler" || !spoilerAnimated()) && !notificationAnimated()) {
         gAnimatedCaptures.clear();
         if (gSpoilerTimer) gSpoilerTimer->updateTimeout(std::nullopt);
     }
@@ -1557,13 +1773,26 @@ void pushNativeValue(lua_State* state, const NativeValue& value) {
 }
 
 std::expected<void, std::string> updateNativeConfiguration(const NativePatch& patch, bool reloadImage = false) {
-    const auto candidate = readNativeConfiguration().patched(patch);
+    NativePatch windows, notifications;
+    for (const auto& [field, value] : patch) {
+        if (field.starts_with(Hyprveil::Notifications::PREFIX))
+            notifications.emplace(field.substr(Hyprveil::Notifications::PREFIX.size()), value);
+        else windows.emplace(field, value);
+    }
+    const auto currentWindow = readNativeConfiguration();
+    const auto currentNotification = readNotificationConfiguration();
+    const std::expected<NativeSettings, std::string> candidate = windows.empty() ?
+        std::expected<NativeSettings, std::string>{currentWindow} : currentWindow.patched(windows);
     if (!candidate) return std::unexpected(candidate.error());
+    const std::expected<NotificationSettings, std::string> notification = notifications.empty() ?
+        std::expected<NotificationSettings, std::string>{currentNotification} : currentNotification.patched(notifications);
+    if (!notification) return std::unexpected(notification.error());
     if (!gConfigWriter) return std::unexpected("native config writer unavailable");
     // Full validation precedes all mutations. No Lua code/eval or IPC is run.
     gConfigBatch = true;
     Hyprutils::Utils::CScopeGuard batch([] { gConfigBatch = false; });
-    const auto values = candidate->values();
+    auto values = candidate->values();
+    values.merge(notification->values());
     for (const auto& [field, ignored] : patch) {
         const auto& value = values.at(field);
         pushNativeValue(gConfigWriter, value);
@@ -1571,10 +1800,15 @@ std::expected<void, std::string> updateNativeConfiguration(const NativePatch& pa
         lua_pop(gConfigWriter, 1);
         if (result.errorCode != Config::Lua::PARSE_ERROR_OK) {
             failNativeConfiguration();
+            failNotificationConfiguration();
             return std::unexpected("validated native setting could not be committed");
         }
     }
-    syncNativeConfiguration();
+    if (!windows.empty()) syncNativeConfiguration();
+    if (!notifications.empty()) syncNotificationConfiguration();
+    if (notifications.contains("shader_path")) { gNotifications.shader.reset(); gNotifications.shaderStatus = "pending"; capturePolicyChanged(); }
+    if (notifications.contains("icon_path")) { gNotifications.iconPath.clear(); gNotifications.icon.reset(); gNotifications.iconStatus = "pending"; capturePolicyChanged(); }
+    if (notifications.contains("image_path")) { gNotifications.imagePath.clear(); gNotifications.image.reset(); gNotifications.imageStatus = "pending"; capturePolicyChanged(); }
     if (patch.contains("shader_path")) { gSpoilerShader.reset(); gSpoilerStatus = "pending"; capturePolicyChanged(); }
     if (patch.contains("icon_path")) { gLoadedIconPath.clear(); gCustomIcon.reset(); gIconStatus = "pending"; capturePolicyChanged(); }
     if (reloadImage || patch.contains("image_path")) {
@@ -1603,6 +1837,13 @@ void pushNativeStatus(lua_State* state) {
     lua_setfield(state, -2, "appearance");
     lua_pushlstring(state, gAppearance.icon.data(), gAppearance.icon.size()); lua_setfield(state, -2, "icon");
     lua_pushinteger(state, gAppearance.iconOpacity); lua_setfield(state, -2, "icon_opacity");
+    lua_createtable(state, 0, 23);
+    for (const auto& [field, value] : gNotifications.settings.values(false)) {
+        pushNativeValue(state, value); lua_setfield(state, -2, field.c_str());
+    }
+    lua_pushinteger(state, 1); lua_setfield(state, -2, "api");
+    lua_pushlstring(state, gNotifications.geometryStatus.data(), gNotifications.geometryStatus.size()); lua_setfield(state, -2, "geometry_status");
+    lua_setfield(state, -2, "notifications");
 }
 
 int luaNativeStatus(lua_State* state) {
@@ -1610,7 +1851,7 @@ int luaNativeStatus(lua_State* state) {
         if (lua_gettop(state) != 0) {
             lua_pushnil(state); lua_pushliteral(state, "hyprveil.status expects no arguments"); return 2;
         }
-        if (gConfigReady) syncNativeConfiguration();
+        if (gConfigReady) { syncNativeConfiguration(); syncNotificationConfiguration(); }
         pushNativeStatus(state);
         return 1;
     } catch (...) {
@@ -1631,11 +1872,11 @@ int luaNativeConfigure(lua_State* state) {
         NativePatch patch;
         lua_pushnil(state);
         while (lua_next(state, 1) != 0) {
-            if (patch.size() >= Hyprveil::NativeConfig::FIELDS.size() || lua_type(state, -2) != LUA_TSTRING)
-                return fail("hyprveil.configure requires at most fifteen string keys");
+            if (patch.size() >= Hyprveil::NativeConfig::FIELDS.size() * 2 + Hyprveil::Notifications::EXTRA_FIELDS.size() || lua_type(state, -2) != LUA_TSTRING)
+                return fail("hyprveil.configure requires at most thirty-three string keys");
             std::size_t size = 0;
             const char* bytes = lua_tolstring(state, -2, &size);
-            if (size > 16) return fail("unknown Hyprveil setting");
+            if (size > 32) return fail("unknown Hyprveil setting");
             const std::string field{bytes, size};
             NativeValue value;
             if (lua_type(state, -1) == LUA_TSTRING) {
@@ -1654,7 +1895,8 @@ int luaNativeConfigure(lua_State* state) {
         return 1;
     } catch (...) {
         failNativeConfiguration();
-        return fail("Hyprveil configuration failed; capture replacement is black");
+        failNotificationConfiguration();
+        return fail("Hyprveil configuration failed; windows use black and notifications are omitted");
     }
 }
 
@@ -1824,38 +2066,45 @@ void registerNativeConfiguration() {
     if (!manager) throw std::runtime_error("hyprveil: this configuration API requires Lua Hyprland");
     // IValue retains each const char*, so registration names must outlive it.
     static const auto names = [] {
-        std::array<std::string, Hyprveil::NativeConfig::FIELDS.size()> result;
-        for (std::size_t index = 0; index < result.size(); ++index)
-            result[index] = "plugin:hyprveil:" + std::string{Hyprveil::NativeConfig::FIELDS[index]};
+        std::vector<std::string> result;
+        for (const auto* field : Hyprveil::NativeConfig::FIELDS)
+            result.emplace_back("plugin:hyprveil:" + std::string{field});
+        for (const auto& [field, ignored] : NotificationSettings{}.values())
+            result.emplace_back("plugin:hyprveil:" + field);
         return result;
     }();
-    const auto defaults = NativeSettings{}.values();
-    for (const auto* field : Hyprveil::NativeConfig::FIELDS)
-        if (manager->m_configValues.contains("plugin.hyprveil." + std::string{field}))
+    auto defaults = NativeSettings{}.values();
+    defaults.merge(NotificationSettings{}.values());
+    for (const auto& [field, ignored] : defaults)
+        if (manager->m_configValues.contains("plugin.hyprveil." + field))
             throw std::runtime_error("hyprveil: native configuration name collision");
     for (std::size_t index = 0; index < names.size(); ++index) {
-        const auto* field = Hyprveil::NativeConfig::FIELDS[index];
+        const auto field = names[index].substr(std::string_view{"plugin:hyprveil:"}.size());
+        const bool notification = field.starts_with(Hyprveil::Notifications::PREFIX);
+        const auto base = notification ? field.substr(Hyprveil::Notifications::PREFIX.size()) : field;
         const auto& value = defaults.at(field);
         SP<Config::Values::IValue> generic;
         UP<Config::Lua::ILuaConfigValue> strict;
         if (const auto* text = std::get_if<std::string>(&value)) {
             generic = makeShared<Config::Values::CStringValue>(names[index].c_str(), "Hyprveil capture replacement setting", *text);
-            strict = makeUnique<NativeString>(field, *text);
+            strict = makeUnique<NativeString>(base, *text, notification);
         } else if (const auto* number = std::get_if<std::int64_t>(&value)) {
-            const int minimum = std::string_view{field} == "eye_size" ? 40 : 0;
-            const int maximum = std::string_view{field} == "eye_size" ? 128 : std::string_view{field} == "speed" ? 200 : 100;
+            const int minimum = base == "eye_size" ? 40 : base == "rounding" ? -1 : 0;
+            const int maximum = base == "eye_size" ? 128 : base == "speed" ? 200 : base == "rounding" ? 64 : 100;
             generic = makeShared<Config::Values::CIntValue>(names[index].c_str(), "Hyprveil capture replacement setting", *number,
                 Config::Values::SIntValueOptions{.min=minimum, .max=maximum});
-            strict = makeUnique<NativeInt>(*number, minimum, maximum);
+            strict = makeUnique<NativeInt>(*number, minimum, maximum, notification);
         } else {
             generic = makeShared<Config::Values::CBoolValue>(names[index].c_str(), "Hyprveil capture replacement setting", std::get<bool>(value));
-            strict = makeUnique<NativeBool>(std::get<bool>(value));
+            strict = makeUnique<NativeBool>(std::get<bool>(value), notification);
         }
         if (!HyprlandAPI::addConfigValueV2(gHandle, generic))
             throw std::runtime_error("hyprveil: typed native config registration failed");
         const auto key = "plugin.hyprveil." + std::string{field};
         manager->m_configValues.at(key) = std::move(strict);
-        if (index == 0) gNativeModeParser = static_cast<NativeString*>(manager->m_configValues.at(key).get());
+        if (field == "mode") gNativeModeParser = static_cast<NativeString*>(manager->m_configValues.at(key).get());
+        if (field == "notification_mode") gNativeNotificationModeParser = static_cast<NativeString*>(manager->m_configValues.at(key).get());
+        if (field == "notification_enabled") gNativeNotificationEnabledParser = static_cast<NativeBool*>(manager->m_configValues.at(key).get());
         // Repoint the official stable pointer cell after replacing its parser.
         manager->getConfigValue(key);
         gRegisteredConfig.emplace_back(key);
@@ -1905,6 +2154,8 @@ void cleanup() {
     if (gConfigWriter) lua_close(gConfigWriter);
     gConfigWriter = nullptr;
     gNativeModeParser = nullptr;
+    gNativeNotificationModeParser = nullptr;
+    gNativeNotificationEnabledParser = nullptr;
     // This also destroys the plugin-owned strict-parser vtables before dlclose.
     if (Config::mgr()) Config::mgr()->onPluginUnload(gHandle);
     gRegisteredConfig.clear();
@@ -1923,6 +2174,8 @@ void cleanup() {
     gWindowOpenListener.reset();
     gRoleWatches.clear();
     gLayerRulesListener.reset();
+    gLayerOpenListener.reset();
+    gLayerCloseListener.reset();
     gConfigReloadListener.reset();
     gLockListener.reset();
     gUnlockListener.reset();
@@ -1954,6 +2207,11 @@ void cleanup() {
     gSpoilerShader.reset();
     gImageShader.reset();
     gImageShaderAttempted = false;
+    gNotifications.image.reset();
+    gNotifications.icon.reset();
+    gNotifications.shader.reset();
+    gNotifications.imageShader.reset();
+    gNotifications.settings.enabled = false;
     for (auto& icon : gSpoilerIcons) icon.reset();
     gLoadedImagePath.clear();
     if (gCommand) {
@@ -1999,6 +2257,24 @@ std::string quotedJson(const std::string& value) {
             result += static_cast<char>(c);
     }
     return result + '"';
+}
+
+std::string notificationJson() {
+    std::string result = "{\"api\":1";
+    for (const auto& [key, value] : gNotifications.settings.values(false)) {
+        result += "," + quotedJson(key) + ":";
+        if (const auto* text = std::get_if<std::string>(&value)) result += quotedJson(*text);
+        else if (const auto* number = std::get_if<std::int64_t>(&value)) result += std::to_string(*number);
+        else result += std::get<bool>(value) ? "true" : "false";
+    }
+    result += ",\"geometry_status\":" + quotedJson(gNotifications.geometryStatus);
+    result += ",\"image_status\":" + quotedJson(gNotifications.imageStatus);
+    result += ",\"icon_status\":" + quotedJson(gNotifications.iconStatus);
+    result += ",\"shader_status\":" + quotedJson(gNotifications.shaderStatus);
+    result += ",\"omitted_layers\":" + std::to_string(gNotifications.omittedLayers);
+    result += ",\"masked_regions\":" + std::to_string(gNotifications.maskedRegions);
+    result += ",\"geometry_fallbacks\":" + std::to_string(gNotifications.geometryFallbacks);
+    return result + "}";
 }
 
 std::string fixturePrivacy() {
@@ -2056,7 +2332,7 @@ std::string activePrivacy() {
 }
 
 std::string command(eHyprCtlOutputFormat, std::string request) {
-    if (gConfigReady) syncNativeConfiguration();
+    if (gConfigReady) { syncNativeConfiguration(); syncNotificationConfiguration(); }
     std::expected<void, std::string> updated;
     if (request == "hyprveil active-privacy")
         return activePrivacy();
@@ -2128,7 +2404,7 @@ std::string command(eHyprCtlOutputFormat, std::string request) {
            ",\"icon\":" + quotedJson(gAppearance.icon) + ",\"icon_opacity\":" + std::to_string(gAppearance.iconOpacity) +
            ",\"mask_color\":" + quotedJson(gMaskColor) + ",\"image_fit\":" + quotedJson(gImageFit) +
            ",\"shader_path\":" + quotedJson(gShaderPath) + ",\"icon_path\":" + quotedJson(gIconPath) +
-           ",\"icon_status\":" + quotedJson(gIconStatus) + "}";
+           ",\"icon_status\":" + quotedJson(gIconStatus) + ",\"notifications\":" + notificationJson() + "}";
 }
 } // namespace
 
@@ -2250,9 +2526,16 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         for (const auto& window : Desktop::windowState()->windows())
             watchWindowRole(window);
         gLayerRulesListener = Event::bus()->m_events.layer.updateRules.listen([](PHLLS) { capturePolicyChanged(); });
+        const auto notificationLifecycle = [](PHLLS layer) {
+            if (layer && gNotifications.settings.enabled && layer->m_namespace == gNotifications.settings.nameSpace)
+                capturePolicyChanged();
+        };
+        gLayerOpenListener = Event::bus()->m_events.layer.opened.listen(notificationLifecycle);
+        gLayerCloseListener = Event::bus()->m_events.layer.closed.listen(notificationLifecycle);
         gConfigPreReloadListener = Event::bus()->m_events.config.preReload.listen([]() {
             gConfigReady = false;
             gMode = "black";
+            gNotifications.settings.profile.mode = "omit";
             gAnimatedCaptures.clear();
             if (gSpoilerTimer) gSpoilerTimer->updateTimeout(std::nullopt);
             try { capturePolicyChanged(); } catch (...) {}
@@ -2263,9 +2546,11 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
                 if (Config::mgr() && !Config::mgr()->configVerifPassed()) {
                     const auto black = updateNativeConfiguration({{"mode", std::string{"black"}}});
                     if (!black) failNativeConfiguration();
-                } else nativeConfigParsed();
+                    failNotificationConfiguration();
+                } else { nativeConfigParsed(); nativeConfigParsed(true); }
             } catch (...) {
                 failNativeConfiguration();
+                failNotificationConfiguration();
             }
             // Even equal settings can accompany changed privacy rules.
             try { capturePolicyChanged(); } catch (...) {}
@@ -2273,7 +2558,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         gLockListener = g_pSessionLockManager->m_events.lock.listen([]() { capturePolicyChanged(); });
         gUnlockListener = g_pSessionLockManager->m_events.unlock.listen([]() { capturePolicyChanged(); });
         gSpoilerTimer = makeShared<CEventLoopTimer>(std::nullopt, [](SP<CEventLoopTimer> timer, void*) {
-            if (!gEnabled || gMode != "spoiler" || !spoilerAnimated() || !g_pHyprRenderer || g_pCompositor->m_isShuttingDown ||
+            if (((!gEnabled || gMode != "spoiler" || !spoilerAnimated()) && !notificationAnimated()) || !g_pHyprRenderer || g_pCompositor->m_isShuttingDown ||
                 g_pSessionLockManager->isSessionLocked()) {
                 gAnimatedCaptures.clear();
                 return;
@@ -2302,7 +2587,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         cleanup();
         throw;
     }
-    return {"hyprveil", "Capture-only privacy with native typed Lua configuration; exact Hyprland ABI required", "OBJLAKO", "0.6.0"};
+    return {"hyprveil", "Capture-only privacy with native typed Lua configuration; exact Hyprland ABI required", "OBJLAKO", "0.7.0"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {

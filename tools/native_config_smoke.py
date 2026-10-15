@@ -24,7 +24,7 @@ from verify_capture import absence_report, color_fraction, differing_fraction, o
 
 LEGACY_APPEARANCE = ("variant", "color", "grain", "speed", "darkness", "eye", "eye_size")
 FIELDS = ("mode", "image_path", *LEGACY_APPEARANCE, "icon", "icon_opacity")
-REVIEWED_RELEASES = ("0.5.0", "0.6.0")
+REVIEWED_RELEASES = ("0.5.0", "0.6.0", "0.7.0")
 DEFAULTS = dict(mode="black", image_path="", **DEFAULT_APPEARANCE)
 CALLBACKS = ("configure", "status", "mode", "cycle", "active_privacy", "set_hidden", "toggle", "reset_sharing")
 

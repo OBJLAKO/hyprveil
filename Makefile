@@ -9,7 +9,7 @@ LDLIBS += $(shell $(PKG_CONFIG) --libs hyprland) -lGLESv2 -ldl -lz
 PREFIX ?= $(HOME)/.local
 DESTDIR ?=
 
-.PHONY: all clean check-abi install-cli upgrade-guard test-session-guard test-png-guard test-privacy-policy test-spoiler-pattern test-appearance test-native-config test-render-assets
+.PHONY: all clean check-abi install-cli upgrade-guard test-session-guard test-png-guard test-privacy-policy test-spoiler-pattern test-appearance test-native-config test-notification-config test-render-assets
 all: build/hyprveil.so
 
 build/abi-probe: src/abi_probe.cpp src/SessionGuard.hpp
@@ -19,7 +19,7 @@ build/abi-probe: src/abi_probe.cpp src/SessionGuard.hpp
 check-abi: build/abi-probe
 	./build/abi-probe --check
 
-build/hyprveil.so: src/main.cpp src/SessionGuard.hpp src/PngGuard.hpp src/PrivacyPolicy.hpp src/SpoilerPattern.hpp src/Appearance.hpp src/NativeConfig.hpp src/RenderAssets.hpp | check-abi
+build/hyprveil.so: src/main.cpp src/SessionGuard.hpp src/PngGuard.hpp src/PrivacyPolicy.hpp src/SpoilerPattern.hpp src/Appearance.hpp src/NativeConfig.hpp src/RenderAssets.hpp src/NotificationConfig.hpp | check-abi
 	mkdir -p build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -shared $< -o $@.tmp $(LDFLAGS) $(LDLIBS)
 	mv $@.tmp $@
@@ -80,6 +80,13 @@ build/native-config-test: src/native_config_test.cpp src/NativeConfig.hpp src/Ap
 
 test-native-config: build/native-config-test
 	./build/native-config-test
+
+build/notification-config-test: src/notification_config_test.cpp src/NotificationConfig.hpp src/NativeConfig.hpp src/Appearance.hpp
+	mkdir -p build
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+test-notification-config: build/notification-config-test
+	./build/notification-config-test
 
 build/render-assets-test: src/render_assets_test.cpp src/RenderAssets.hpp
 	mkdir -p build

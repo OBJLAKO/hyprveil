@@ -84,6 +84,23 @@ APPEARANCE_RANGES = {"grain": (0, 100), "speed": (0, 200),
 LUA_BEGIN = "-- BEGIN HYPRVEIL SETTINGS v1"
 LUA_END = "-- END HYPRVEIL SETTINGS v1"
 CONFIG_FIELDS = ("mode", "image_path", *DEFAULT_APPEARANCE, *DEFAULT_RENDER)
+NOTIFICATION_DEFAULTS = dict(mode="omit", image_path="", **DEFAULT_APPEARANCE, **DEFAULT_RENDER,
+                             enabled=False, namespace="omarchy-notifications", rounding=-1)
+NOTIFICATION_FIELDS = tuple("notification_" + key for key in NOTIFICATION_DEFAULTS)
+ALL_CONFIG_FIELDS = (*CONFIG_FIELDS, *NOTIFICATION_FIELDS)
+
+
+def notification_values(values, canonical=False):
+    if not isinstance(values, dict) or NOTIFICATION_DEFAULTS.keys() - values.keys():
+        raise Refused("incomplete notification configuration")
+    if type(values["enabled"]) is not bool:
+        raise Refused("notification_enabled must be boolean")
+    if not isinstance(values["namespace"], str) or not re.fullmatch(r"[a-zA-Z0-9_.-]{1,128}", values["namespace"]):
+        raise Refused("notification_namespace must be one exact namespace")
+    if type(values["rounding"]) is not int or not -1 <= values["rounding"] <= 64:
+        raise Refused("notification_rounding must be -1 or 0..64")
+    profile = config_values({key: values[key] for key in CONFIG_FIELDS}, canonical=canonical)
+    return dict(profile, **{key: values[key] for key in ("enabled", "namespace", "rounding")})
 
 
 def lua_string(value):
@@ -126,19 +143,35 @@ def native_values(status, canonical=True):
             raise Refused(key + " must be empty or a bounded absolute path without control characters")
     if render["shader_path"] and not render["shader_path"].lower().endswith(".frag"):
         raise Refused("shader_path must end in .frag")
-    return dict(mode=mode, image_path=image, **appearance, **dict(render, mask_color=color.lower()))
+    result = dict(mode=mode, image_path=image, **appearance, **dict(render, mask_color=color.lower()))
+    notifications = status.get("notifications")
+    if notifications is not None:
+        if not isinstance(notifications, dict) or type(notifications.get("api")) is not int or notifications["api"] != 1:
+            raise Refused("unsupported native notification configuration")
+        result.update({"notification_" + key: value for key, value in
+                       notification_values(notifications, canonical=canonical).items()})
+    return result
 
 
 def config_values(values, canonical=False):
-    return native_values({"mode": values["mode"], "image_path": values["image_path"],
+    status = {"mode": values["mode"], "image_path": values["image_path"],
         "appearance": {key: values[key] for key in DEFAULT_APPEARANCE if key in values},
-        **{key: values[key] for key in DEFAULT_RENDER if key in values}}, canonical=canonical)
+        **{key: values[key] for key in DEFAULT_RENDER if key in values}}
+    if any(key in values for key in NOTIFICATION_FIELDS):
+        status["notifications"] = dict(api=1, **{key.removeprefix("notification_"): values[key]
+                                                for key in NOTIFICATION_FIELDS if key in values})
+    return native_values(status, canonical=canonical)
 
 
 def normalize_config_patch(patch, current=None):
-    if not isinstance(patch, dict) or patch.keys() - set(CONFIG_FIELDS):
+    if not isinstance(patch, dict) or patch.keys() - set(ALL_CONFIG_FIELDS):
         raise Refused("unsupported native configuration patch")
     base = native_values(current) if current is not None else dict(mode="black", image_path="", **DEFAULT_APPEARANCE, **DEFAULT_RENDER)
+    if patch.keys() & set(NOTIFICATION_FIELDS):
+        if current is not None and not set(NOTIFICATION_FIELDS) <= base.keys():
+            raise Refused("this loaded release does not support notification profiles")
+        if current is None:
+            base.update({"notification_" + key: value for key, value in NOTIFICATION_DEFAULTS.items()})
     candidate = config_values(dict(base, **patch))
     return {key: candidate[key] for key in patch}
 
@@ -146,7 +179,9 @@ def normalize_config_patch(patch, current=None):
 def lua_settings_block(values, include_render=True):
     values = config_values(values)
     lines = [LUA_BEGIN, "local hyprveil_settings = {"]
-    for key in CONFIG_FIELDS:
+    for key in ALL_CONFIG_FIELDS:
+        if key not in values:
+            continue
         if key in DEFAULT_RENDER and not include_render:
             continue
         value = values[key]
@@ -188,8 +223,8 @@ def parse_lua_settings(contents):
         if comment:
             remainder = remainder[comment.end():]
             continue
-        field = re.match(r"\s*([a-z_]+)\s*=\s*(" + string + r"|true|false|[0-9]+)\s*,\s*", remainder)
-        if not field or field[1] not in CONFIG_FIELDS or field[1] in values:
+        field = re.match(r"\s*([a-z_]+)\s*=\s*(" + string + r"|true|false|-?[0-9]+)\s*,\s*", remainder)
+        if not field or field[1] not in ALL_CONFIG_FIELDS or field[1] in values:
             raise Refused("settings block must contain each supported literal field exactly once")
         key, literal = field[1], field[2]
         if literal[0] == '"':
@@ -663,13 +698,20 @@ class Controller:
         # keys. The compare and partial commit execute in one compositor turn.
         lua_settings_block(candidate)
         self.preflight_assets(patch, candidate)
+        if patch.keys() & set(NOTIFICATION_FIELDS):
+            self.preflight_assets({key.removeprefix("notification_"): value for key, value in patch.items()
+                                   if key in NOTIFICATION_FIELDS},
+                                  {key.removeprefix("notification_"): candidate[key] for key in NOTIFICATION_FIELDS})
         def literal(value):
             return lua_string(value) if isinstance(value, str) else ("true" if value else "false") if type(value) is bool else str(value)
         assertions = []
         for field, value in before.items():
             if field in (*ICON_FIELDS, *DEFAULT_RENDER) and field not in expected:
                 continue
-            accessor = "s." + field if field in ("mode", "image_path", *ICON_FIELDS, *DEFAULT_RENDER) else "s.appearance." + field
+            if field.startswith("notification_"):
+                accessor = "s.notifications." + field.removeprefix("notification_")
+            else:
+                accessor = "s." + field if field in ("mode", "image_path", *ICON_FIELDS, *DEFAULT_RENDER) else "s.appearance." + field
             assertions.append(accessor + " == " + literal(value))
         entries = ",".join(key + "=" + literal(value) for key, value in patch.items())
         code = ('local p=hl.plugin.hyprveil; assert(p,"Hyprveil unavailable"); local s=p.status(); '
@@ -956,7 +998,10 @@ class Controller:
             return None
         before = read_lua_settings(self.lua_path)
         text, start, finish, saved = parse_lua_settings(before[0])
-        values = config_values(dict(native_values(current), **updates))
+        current_values = native_values(current)
+        if set(NOTIFICATION_FIELDS) & saved.keys() and not set(NOTIFICATION_FIELDS) <= current_values.keys():
+            raise Refused("the loaded release cannot preserve saved notification settings")
+        values = config_values(dict(current_values, **updates))
         include_render = DEFAULT_RENDER.keys() <= current.keys()
         if not include_render and any(saved[key] != default for key, default in DEFAULT_RENDER.items()):
             raise Refused("the loaded release cannot preserve these saved rendering settings")

@@ -28,7 +28,7 @@ jobs:
         run: /usr/bin/python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Standalone C++ boundaries
         if: ${{ !matrix.sanitizer }}
-        run: make test-session-guard test-png-guard test-privacy-policy test-spoiler-pattern test-appearance test-native-config test-render-assets
+        run: make test-session-guard test-png-guard test-privacy-policy test-spoiler-pattern test-appearance test-native-config test-notification-config test-render-assets
       - name: C++ memory and undefined-behavior checks
         if: ${{ matrix.sanitizer }}
         env:
@@ -37,4 +37,4 @@ jobs:
         run: >-
           make CXXFLAGS='-O1 -g -std=c++23 -Wall -Wextra -fno-omit-frame-pointer -fsanitize=address,undefined'
           test-session-guard test-png-guard test-privacy-policy
-          test-spoiler-pattern test-appearance test-native-config test-render-assets
+          test-spoiler-pattern test-appearance test-native-config test-notification-config test-render-assets
